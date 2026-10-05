@@ -1,12 +1,12 @@
 // Local-first persistence. Everything lives in localStorage; nothing leaves the browser
 // except TMDB lookups the user's own key makes.
-import { emptyRank } from './ranking.js';
+import { emptyOrder } from './ranking.js';
 
 const KEY = 'reel-taste:v1';
 
 export const emptyState = () => ({
   movies: {},            // key -> { key, title, year, rating, watchedDate, sources, meta }
-  rank: emptyRank(),
+  order: emptyOrder(),   // ranked film keys, best first
   favorites: [],         // ordered keys from an imported favourites list
   hidden: [],            // keys the user dismissed
   watchlist: [],         // saved candidate metas
@@ -14,10 +14,17 @@ export const emptyState = () => ({
   settings: { tmdbKey: '', region: 'US', services: [], syncPass: '' }, // device-local, never synced
 });
 
+// Older versions kept three buckets (state.rank); flatten them into one ordered list.
+export function migrate(state) {
+  if (!state.order) state.order = state.rank ? [...state.rank.loved, ...state.rank.liked, ...state.rank.meh] : [];
+  delete state.rank;
+  return state;
+}
+
 export function load(storage = globalThis.localStorage) {
   try {
     const raw = storage?.getItem(KEY);
-    return raw ? { ...emptyState(), ...JSON.parse(raw) } : emptyState();
+    return raw ? migrate({ ...emptyState(), ...JSON.parse(raw) }) : emptyState();
   } catch { return emptyState(); }
 }
 

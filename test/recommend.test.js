@@ -3,11 +3,11 @@ import assert from 'node:assert/strict';
 import { buildProfile, rank } from '../src/recommend.js';
 import { MOODS } from '../src/moods.js';
 import { DEMO_CATALOG, demoLibrary } from '../src/demo.js';
-import { computeScores, emptyRank, seedFromRatings } from '../src/ranking.js';
+import { computeScores, seedFromRatings } from '../src/ranking.js';
 
 function setup() {
   const movies = demoLibrary();
-  const r = emptyRank(); seedFromRatings(r, movies);
+  const r = []; seedFromRatings(r, movies);
   const scores = computeScores(r);
   const profile = buildProfile(Object.values(movies).map(m => ({ meta: m.meta, score: scores[m.key] })));
   return { movies, profile };

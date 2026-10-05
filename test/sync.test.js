@@ -1,25 +1,30 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mergeStates, syncPayload } from '../src/sync.js';
-import { emptyState } from '../src/store.js';
+import { emptyState, migrate } from '../src/store.js';
 import handler from '../api/state.js';
 import tmdbHandler from '../api/tmdb.js';
 
-const mk = (updatedAt, movies, rank) => ({ ...emptyState(), updatedAt, movies, rank: { loved: [], liked: [], meh: [], ...rank } });
+const mk = (updatedAt, movies, order = []) => ({ ...emptyState(), updatedAt, movies, order });
 const film = (key, rating = null) => ({ key, title: key, year: 2000, rating, meta: null });
 
 test('merge keeps additions from both devices and the newer ranking order', () => {
-  const phone = mk(200, { a: film('a', 5), b: film('b', 4) }, { loved: ['b', 'a'] });
-  const laptop = mk(100, { a: film('a', 5), c: film('c', 3) }, { loved: ['a'], liked: ['c'] });
+  const phone = mk(200, { a: film('a', 5), b: film('b', 4) }, ['b', 'a']);
+  const laptop = mk(100, { a: film('a', 5), c: film('c', 3) }, ['a', 'c']);
   const m = mergeStates(laptop, phone);
   assert.deepEqual(Object.keys(m.movies).sort(), ['a', 'b', 'c']);
-  assert.deepEqual(m.rank.loved, ['b', 'a']);
-  assert.deepEqual(m.rank.liked, ['c']);
+  assert.deepEqual(m.order, ['b', 'a', 'c']);
   assert.equal(m.updatedAt, 200);
 });
 
+test('old bucketed saves migrate to one ordered list', () => {
+  const old = { movies: {}, rank: { loved: ['a'], liked: ['b'], meh: ['c'] } };
+  assert.deepEqual(migrate(old).order, ['a', 'b', 'c']);
+  assert.equal('rank' in old, false);
+});
+
 test('merge fills a rating the newer side lacks', () => {
-  const m = mergeStates(mk(2, { a: film('a') }, {}), mk(1, { a: film('a', 4) }, {}));
+  const m = mergeStates(mk(2, { a: film('a') }), mk(1, { a: film('a', 4) }));
   assert.equal(m.movies.a.rating, 4);
 });
 

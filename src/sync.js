@@ -20,16 +20,13 @@ export function mergeStates(a, b) {
     const o = older.movies[k];
     movies[k] = o ? { ...o, ...m, rating: m.rating ?? o.rating, meta: m.meta ?? o.meta } : m;
   }
-  const rank = { loved: [...newer.rank.loved], liked: [...newer.rank.liked], meh: [...newer.rank.meh] };
-  const placed = new Set([...rank.loved, ...rank.liked, ...rank.meh]);
-  for (const bucket of Object.keys(rank)) {
-    for (const k of older.rank[bucket]) if (!placed.has(k) && movies[k]) { rank[bucket].push(k); placed.add(k); }
-  }
-  for (const bucket of Object.keys(rank)) rank[bucket] = rank[bucket].filter(k => movies[k]);
+  const order = newer.order.filter(k => movies[k]);
+  const placed = new Set(order);
+  for (const k of older.order) if (!placed.has(k) && movies[k]) order.push(k);
   const watchlist = [...newer.watchlist];
   for (const m of older.watchlist) if (!watchlist.some(w => w.key === m.key)) watchlist.push(m);
   return {
-    ...newer, movies, rank, watchlist,
+    ...newer, movies, order, watchlist,
     hidden: [...new Set([...newer.hidden, ...older.hidden])],
     favorites: newer.favorites?.length ? newer.favorites : (older.favorites || []),
     updatedAt: Math.max(a.updatedAt || 0, b.updatedAt || 0),

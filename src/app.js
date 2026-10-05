@@ -1,4 +1,4 @@
-import { load, save } from './store.js';
+import { load, save, migrate } from './store.js';
 import { parseExport, mergeIntoLibrary, movieKey, isListExport, parseList } from './importers.js';
 import * as R from './ranking.js';
 import { buildProfile, rank as rankCandidates } from './recommend.js';
@@ -28,7 +28,7 @@ async function syncNow() {
     ui.proxy = tmdbProxy;
     let next = state;
     if (remote) {
-      const merged = mergeStates(state, { ...remote, settings: state.settings });
+      const merged = mergeStates(state, { ...migrate(remote), settings: state.settings });
       Object.assign(state, merged, { settings: state.settings });
       next = state;
     }
@@ -55,8 +55,8 @@ document.getElementById('nav').addEventListener('click', e => {
 });
 
 // ---- derived data -------------------------------------------------------------
-const scores = () => R.computeScores(state.rank);
-const unplaced = () => Object.values(state.movies).filter(m => !R.bucketOf(state.rank, m.key));
+const scores = () => R.computeScores(state.order);
+const unplaced = () => Object.values(state.movies).filter(m => !R.isRanked(state.order, m.key));
 function profile() {
   const sc = scores();
   return buildProfile(Object.values(state.movies).map(m => ({
@@ -160,42 +160,40 @@ function renderRecommend() {
 }
 
 // ---- Rank (Beli-style) --------------------------------------------------------
-function startRanking(key) { ui.tab = 'rank'; ui.session = { key, step: 'bucket' }; render(); }
+function startRanking(key) { ui.tab = 'rank';
+  const ins = R.startInsertion(state.order.filter(k => k !== key).length);
+  ui.session = { key, step: R.isDone(ins) ? 'done' : 'duel', ins };
+  if (ui.session.step === 'done') return finishPlacement();
+  render();
+}
 function nextToRank() { const u = unplaced(); return u.length ? u[0].key : null; }
 
 function renderRank() {
   const s = ui.session;
   const left = unplaced().length;
   if (!s) {
-    const placed = R.flatRanking(state.rank).length;
+    const placed = state.order.length;
     return `<h2>Rank your movies</h2>
-      <p class="muted">${placed} ranked · ${left} still unranked. Pick a gut reaction, then choose between films head-to-head — like Beli.</p>
+      <p class="muted">${placed} ranked · ${left} still unranked. Add a film and I'll ask which you liked more than films already on your list, narrowing down until it lands in the right spot. It never needs to compare against everything.</p>
       <div class="row">
         <button class="primary" data-act="rank-next" ${left ? '' : 'disabled'}>Rank next film</button>
-        <button data-act="seed" ${Object.values(state.movies).some(m => m.rating != null && !R.bucketOf(state.rank, m.key)) ? '' : 'disabled'}>Quick-place by my star ratings</button>
+        <button data-act="seed" ${Object.values(state.movies).some(m => m.rating != null && !R.isRanked(state.order, m.key)) ? '' : 'disabled'}>Quick-place by my star ratings</button>
         <button data-act="refine" ${placed >= 2 ? '' : 'disabled'}>Refine a close call</button>
       </div>`;
   }
-  const m = state.movies[s.key];
-  if (s.step === 'bucket') {
-    return `<h2>What did you think of ${esc(m.title)} <span class="muted">(${esc(m.year ?? '')})</span>?</h2>
-      ${m.rating != null ? `<p class="muted">Your Letterboxd rating: ${'★'.repeat(Math.floor(m.rating))}${m.rating % 1 ? '½' : ''}</p>` : ''}
-      <div class="row">
-        ${R.BUCKET_ORDER.map(b => `<button data-act="bucket" data-b="${b}">${esc(R.BUCKETS[b].label)}</button>`).join('')}
-        <button class="ghost" data-act="skip">Haven't seen it</button>
-        <button class="ghost" data-act="rank-stop">Done for now</button>
-      </div>`;
-  }
   if (s.step === 'duel') {
-    const probe = state.movies[state.rank[s.bucket][R.probeIndex(s.ins)]];
+    const m = state.movies[s.key];
+    const others = state.order.filter(k => k !== s.key);
+    const probe = state.movies[others[R.probeIndex(s.ins)]];
     return `<h2>Which did you like more?</h2>
+      <p class="muted">Placing <b>${esc(m.title)}</b>${m.rating != null ? ` (you gave it ${m.rating}★)` : ''} · about ${R.duelsLeft(s.ins)} more</p>
       <div class="duel">
         <button data-act="duel" data-new="1">${esc(m.title)}<br><span class="muted">${esc(m.year ?? '')}</span></button>
         <button data-act="duel" data-new="0">${esc(probe.title)}<br><span class="muted">${esc(probe.year ?? '')}</span></button>
       </div>
-      <div class="row"><button class="ghost" data-act="rank-stop">Cancel</button></div>`;
+      <div class="row"><button class="ghost" data-act="skip-duel">Can't compare these</button>
+        <button class="ghost" data-act="rank-stop">Cancel</button></div>`;
   }
-  // refine
   const a = state.movies[s.pair.upper], b = state.movies[s.pair.lower];
   return `<h2>Close call — which do you prefer?</h2>
     <div class="duel">
@@ -207,9 +205,9 @@ function renderRank() {
 // ---- My Top list --------------------------------------------------------------
 function renderLibrary() {
   const sc = scores();
-  const flat = R.flatRanking(state.rank);
+  const flat = state.order;
   if (!flat.length) return `<h2>My Top</h2><p class="muted">Nothing ranked yet. Head to the Rank tab.</p>`;
-  return `<h2>My Top ${flat.length}</h2><ol class="rank">${flat.map(k => {
+  return `<h2>My Top ${flat.length}</h2>${ui.status ? `<p class="banner">${esc(ui.status)}</p>` : ''}<ol class="rank">${flat.map(k => {
     const m = state.movies[k]; if (!m) return '';
     return `<li><span class="score">${sc[k].toFixed(1)}</span> ${esc(m.title)} <span class="muted">(${esc(m.year ?? '')})</span></li>`;
   }).join('')}</ol>`;
@@ -260,8 +258,8 @@ async function handleFiles(input) {
     const r = mergeIntoLibrary(state, items);
     msgs.push(`${f.name}: ${items.length} rows (${source}), ${r.added} new`);
   }
-  R.seedFromRatings(state.rank, state.movies);
-  R.applyFavoritesOrder(state.rank, state.favorites || [], new Set(Object.keys(state.movies)));
+  R.seedFromRatings(state.order, state.movies);
+  R.applyFavoritesOrder(state.order, state.favorites || [], new Set(Object.keys(state.movies)));
   persist();
   ui.status = msgs.join(' · ') + (isDemo() ? '' : ' — looking up details…');
   render();
@@ -308,21 +306,16 @@ $app.addEventListener('click', async e => {
     }
     case 'rank-next': { const k = nextToRank(); return k && startRanking(k); }
     case 'rank-stop': ui.session = null; persist(); return render();
-    case 'skip': { delete state.movies[s.key]; persist(); const k = nextToRank(); return k ? startRanking(k) : (ui.session = null, render()); }
-    case 'seed': R.seedFromRatings(state.rank, state.movies); persist(); return render();
-    case 'bucket': {
-      s.bucket = btn.dataset.b; s.ins = R.startInsertion(state.rank[s.bucket].length);
-      if (R.isDone(s.ins)) return finishPlacement();
-      s.step = 'duel'; return render();
-    }
+    case 'seed': R.seedFromRatings(state.order, state.movies); persist(); return render();
+    case 'skip-duel': s.ins = R.skip(s.ins); return R.isDone(s.ins) ? finishPlacement() : render();
     case 'duel': {
       s.ins = R.answer(s.ins, btn.dataset.new === '1');
       return R.isDone(s.ins) ? finishPlacement() : render();
     }
-    case 'refine': { const pair = R.pickRefinePair(state.rank); if (pair) { ui.session = { step: 'refine', pair }; render(); } return; }
+    case 'refine': { const pair = R.pickRefinePair(state.order); if (pair) { ui.session = { step: 'refine', pair }; render(); } return; }
     case 'refine-pick': {
-      if (btn.dataset.lower === '1') R.swapPair(state.rank, s.pair);
-      persist(); const pair = R.pickRefinePair(state.rank); ui.session = pair ? { step: 'refine', pair } : null; return render();
+      if (btn.dataset.lower === '1') R.swapPair(state.order, s.pair);
+      persist(); const pair = R.pickRefinePair(state.order); ui.session = pair ? { step: 'refine', pair } : null; return render();
     }
     case 'add-manual': {
       const title = document.getElementById('m-title').value.trim();
@@ -331,7 +324,7 @@ $app.addEventListener('click', async e => {
       mergeIntoLibrary(state, [{ title, year, rating: null, watchedDate: null, source: 'manual' }]);
       persist(); if (!isDemo()) enrichLibrary(); ui.status = `Added ${title}.`; return render();
     }
-    case 'demo': Object.assign(state.movies, demoLibrary()); R.seedFromRatings(state.rank, state.movies); persist(); ui.status = 'Demo library loaded.'; return render();
+    case 'demo': Object.assign(state.movies, demoLibrary()); R.seedFromRatings(state.order, state.movies); persist(); ui.status = 'Demo library loaded.'; return render();
     case 'enrich': return enrichLibrary();
     case 'wipe': if (confirm('Erase your library, rankings and settings from this browser?')) { localStorage.clear(); location.reload(); } return;
     case 'save-settings':
@@ -350,11 +343,14 @@ $app.addEventListener('change', e => {
 
 function finishPlacement() {
   const s = ui.session;
-  R.insertAt(state.rank, s.bucket, s.key, R.position(s.ins));
+  const pos = R.position(s.ins);
+  R.insertAt(state.order, s.key, pos);
   persist();
+  const m = state.movies[s.key];
+  ui.status = `${m.title} is now #${pos + 1} of ${state.order.length}.`;
   const k = nextToRank();
   ui.session = null;
-  if (k && confirm('Placed! Rank the next film?')) return startRanking(k);
+  if (k && confirm(`${ui.status} Rank the next film?`)) return startRanking(k);
   ui.tab = 'library';
   render();
 }

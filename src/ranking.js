@@ -1,108 +1,88 @@
-// Beli-style ranking. A film first lands in a bucket (loved / liked / meh), then is placed
-// inside that bucket by binary-search "which do you prefer?" duels. Scores are derived from
-// position, so the list is always a strict ordering.
-export const BUCKETS = {
-  loved: { label: 'Loved it', range: [10, 7] },
-  liked: { label: 'It was fine / liked it', range: [6.9, 4] },
-  meh: { label: "Didn't like it", range: [3.9, 1] },
-};
-export const BUCKET_ORDER = ['loved', 'liked', 'meh'];
+// One ranked list, best first. A new film is placed by binary search: "which do you like
+// more, X or the film at the middle of the remaining range?" Each answer halves the range,
+// so ~log2(N) questions place a film among N, and the list learns your order as you go.
+// Scores come from list position.
 
-export const emptyRank = () => ({ loved: [], liked: [], meh: [] });
-
-export function bucketFromRating(r) {
-  if (r >= 4) return 'loved';
-  if (r >= 3) return 'liked';
-  return 'meh';
-}
-
-export function bucketOf(rank, key) {
-  return BUCKET_ORDER.find(b => rank[b].includes(key)) || null;
-}
-
-export function removeFromRank(rank, key) {
-  for (const b of BUCKET_ORDER) rank[b] = rank[b].filter(k => k !== key);
-}
+export const emptyOrder = () => [];
+export const isRanked = (order, key) => order.includes(key);
 
 // --- Binary insertion session -------------------------------------------------
-// Insert into a list ordered best-first. Each step compares the new film to list[mid].
+// Insert into `length` ranked films. Optional `skipped` indexes are comparisons the user
+// couldn't answer (e.g. can't remember it); the probe moves to the nearest other film.
 export function startInsertion(length) {
-  return { lo: 0, hi: length };
+  return { lo: 0, hi: length, skipped: [] };
 }
-export const isDone = s => s.lo >= s.hi;
-export const probeIndex = s => Math.floor((s.lo + s.hi) / 2);
+
+// Index to compare against next, or -1 if every film left in the range was skipped.
+export function probeIndex(s) {
+  const mid = Math.floor((s.lo + s.hi) / 2);
+  for (let d = 0; d < s.hi - s.lo; d++) {
+    for (const i of d === 0 ? [mid] : [mid + d, mid - d]) {
+      if (i >= s.lo && i < s.hi && !s.skipped.includes(i)) return i;
+    }
+  }
+  return -1;
+}
+export const isDone = s => s.lo >= s.hi || probeIndex(s) === -1;
 export function answer(s, newIsBetter) {
   const mid = probeIndex(s);
-  return newIsBetter ? { lo: s.lo, hi: mid } : { lo: mid + 1, hi: s.hi };
+  return newIsBetter
+    ? { ...s, hi: mid, skipped: s.skipped.filter(i => i < mid) }
+    : { ...s, lo: mid + 1, skipped: s.skipped.filter(i => i > mid) };
 }
-export const position = s => s.lo;
+export const skip = s => ({ ...s, skipped: [...s.skipped, probeIndex(s)] });
+// Where the new film goes. If comparisons ran out, it lands in the middle of what's left.
+export const position = s => (s.lo >= s.hi ? s.lo : Math.floor((s.lo + s.hi) / 2));
 
-export function insertAt(rank, bucket, key, pos) {
-  removeFromRank(rank, key);
-  rank[bucket].splice(pos, 0, key);
+// Rough questions remaining (shown as progress).
+export const duelsLeft = s => Math.max(0, Math.ceil(Math.log2(s.hi - s.lo + 1)));
+
+// `pos` is an index into the list *without* `key` (that's what the insertion session counts).
+export function insertAt(order, key, pos) {
+  removeFromOrder(order, key);
+  order.splice(pos, 0, key);
 }
-
-// Worst-case duel count to place into a list of n.
-export const maxDuels = n => Math.ceil(Math.log2(n + 1));
+export function removeFromOrder(order, key) {
+  const i = order.indexOf(key);
+  if (i >= 0) order.splice(i, 1);
+}
 
 // --- Scores -------------------------------------------------------------------
-export function computeScores(rank) {
-  const scores = {};
-  for (const b of BUCKET_ORDER) {
-    const [hi, lo] = BUCKETS[b].range;
-    const list = rank[b];
-    list.forEach((key, i) => {
-      const t = list.length === 1 ? 0.5 : i / (list.length - 1);
-      scores[key] = Math.round((hi - (hi - lo) * t) * 10) / 10;
-    });
-  }
-  return scores;
+// 10 at the top, falling 0.25 per place (compressed for long lists so the last is ~1).
+export function computeScores(order) {
+  const step = order.length > 1 ? Math.min(0.25, 9 / (order.length - 1)) : 0;
+  return Object.fromEntries(order.map((k, i) => [k, Math.round((10 - i * step) * 10) / 10]));
 }
 
-export function flatRanking(rank) {
-  return BUCKET_ORDER.flatMap(b => rank[b]);
-}
-
-// Quick-start: place every rated, unplaced film by its star rating (ties keep import order).
-export function seedFromRatings(rank, movies) {
-  const placed = new Set(flatRanking(rank));
-  const fresh = Object.values(movies).filter(m => m.rating != null && !placed.has(m.key));
-  for (const b of BUCKET_ORDER) {
-    const group = fresh.filter(m => bucketFromRating(m.rating) === b)
-      .sort((a, c) => c.rating - a.rating);
-    // Merge into existing list keeping rating order against already-placed films.
-    for (const m of group) {
-      const list = rank[b];
-      let i = 0;
-      while (i < list.length && (movies[list[i]]?.rating ?? 0) >= m.rating) i++;
-      list.splice(i, 0, m.key);
-    }
+// Quick-start: place rated, unplaced films by star rating (ties keep import order),
+// merging with anything already ranked.
+export function seedFromRatings(order, movies) {
+  const fresh = Object.values(movies)
+    .filter(m => m.rating != null && !order.includes(m.key))
+    .sort((a, b) => b.rating - a.rating);
+  for (const m of fresh) {
+    let i = 0;
+    while (i < order.length && (movies[order[i]]?.rating ?? 0) >= m.rating) i++;
+    order.splice(i, 0, m.key);
   }
   return fresh.length;
 }
 
-// Pick two adjacent films in one bucket to re-compare (refine mode). Returns null if none.
-export function pickRefinePair(rank, rand = Math.random) {
-  const options = BUCKET_ORDER.filter(b => rank[b].length >= 2);
-  if (!options.length) return null;
-  const b = options[Math.floor(rand() * options.length)];
-  const i = Math.floor(rand() * (rank[b].length - 1));
-  return { bucket: b, i, upper: rank[b][i], lower: rank[b][i + 1] };
-}
-// If the user prefers `lower`, swap the pair.
-export function swapPair(rank, pair) {
-  const list = rank[pair.bucket];
-  [list[pair.i], list[pair.i + 1]] = [list[pair.i + 1], list[pair.i]];
+// Pin an ordered favourites list (e.g. a Letterboxd "Top 10") to the top, in list order.
+// Favourites not ranked yet are added. Keys not in `known` are ignored.
+export function applyFavoritesOrder(order, orderedKeys, known = null) {
+  const pinned = orderedKeys.filter(k => order.includes(k) || !known || known.has(k));
+  const rest = order.filter(k => !pinned.includes(k));
+  order.splice(0, order.length, ...pinned, ...rest);
 }
 
-// Pin an ordered favourites list (e.g. a Letterboxd "Top 10") to the top of the buckets
-// the films already sit in, preserving the list's order. Favourites that haven't been
-// placed yet (no star rating) go into "loved" at their listed spot. Keys not in `known` are ignored.
-export function applyFavoritesOrder(rank, orderedKeys, known = null) {
-  const placed = new Set(flatRanking(rank));
-  for (const k of orderedKeys) if (!placed.has(k) && (!known || known.has(k))) rank.loved.push(k);
-  for (const b of BUCKET_ORDER) {
-    const pinned = orderedKeys.filter(k => rank[b].includes(k));
-    rank[b] = [...pinned, ...rank[b].filter(k => !pinned.includes(k))];
-  }
+// --- Refine: re-compare two neighbours ----------------------------------------
+export function pickRefinePair(order, rand = Math.random) {
+  if (order.length < 2) return null;
+  const i = Math.floor(rand() * (order.length - 1));
+  return { i, upper: order[i], lower: order[i + 1] };
+}
+// If the user prefers `lower`, swap the pair.
+export function swapPair(order, pair) {
+  [order[pair.i], order[pair.i + 1]] = [order[pair.i + 1], order[pair.i]];
 }
