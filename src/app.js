@@ -1,4 +1,4 @@
-import { load, save, migrate } from './store.js';
+import { load, save, migrate, emptyState } from './store.js';
 import { parseExport, mergeIntoLibrary, movieKey, norm, isListExport, parseList } from './importers.js';
 import * as R from './ranking.js';
 import { buildProfile, rank as rankCandidates } from './recommend.js';
@@ -7,7 +7,7 @@ import { BRAND } from './brand.js';
 import { createClient, imageUrl, streamingOn } from './tmdb.js';
 import { DEMO_CATALOG, demoLibrary } from './demo.js';
 import { unzipText, isLetterboxdTasteFile } from './unzip.js';
-import { createSyncClient, mergeStates } from './sync.js';
+import { createSyncClient, mergeStates, syncPayload } from './sync.js';
 
 const THEME_KEY = 'reel-taste:theme';
 const getTheme = () => { try { return localStorage.getItem(THEME_KEY) || 'dark'; } catch { return 'dark'; } };
@@ -540,6 +540,10 @@ function renderSettings() {
       <div class="row">${[['dark', 'Dark'], ['light', 'Light'], ['auto', 'Match device']].map(([v, l]) =>
         `<button class="${getTheme() === v ? 'primary' : 'secondary'}" data-act="theme" data-v="${v}">${l}</button>`).join('')}</div>
       <p class="muted">Saved on this device. Dark is the default.</p></div>
+    <div class="panel"><b>Your data</b>
+      <p class="muted">Download a backup of your library and rankings, or restore one (it merges, nothing is lost). Handy for moving to a new web address.</p>
+      <div class="row"><button class="secondary" data-act="export">Download backup</button>
+        <label class="btn secondary" style="cursor:pointer">Restore from backup<input type="file" id="file-restore" accept=".json,application/json" hidden></label></div></div>
     <div class="panel"><b>Sync across devices</b>
       <p class="muted">Enter the passphrase you set as <code>SYNC_PASSWORD</code> in Vercel. Use the same one on every device and your library, rankings and watchlist stay in sync. It's saved only on this device.</p>
       <input id="s-pass" type="password" size="30" value="${esc(s.syncPass)}" placeholder="Sync passphrase">
@@ -628,6 +632,11 @@ $app.addEventListener('click', async e => {
       mergeIntoLibrary(state, [{ title, year, rating: null, watchedDate: null, source: 'manual' }]);
       persist(); if (!isDemo()) enrichLibrary(); ui.status = `Added ${title}.`; return render();
     }
+    case 'export': {
+      const url = URL.createObjectURL(new Blob([JSON.stringify(syncPayload(state), null, 1)], { type: 'application/json' }));
+      Object.assign(document.createElement('a'), { href: url, download: `${BRAND.name.toLowerCase()}-backup-${today()}.json` }).click();
+      setTimeout(() => URL.revokeObjectURL(url), 1000); return;
+    }
     case 'demo': ui.picks = null; Object.assign(state.movies, demoLibrary()); R.seedFromRatings(state.order, state.movies); persist(); ui.status = 'Demo library loaded.'; return render();
     case 'enrich': return enrichLibrary();
     case 'wipe': if (confirm('Erase your library, rankings and settings from this browser?')) { localStorage.clear(); location.reload(); } return;
@@ -646,8 +655,21 @@ $app.addEventListener('input', e => {
 });
 $app.addEventListener('change', e => {
   if (e.target.dataset.filter === 'genre') { ui.filters.genre = e.target.value; loadPicks(); }
+  if (e.target.id === 'file-restore') restoreBackup(e.target);
   if (e.target.id === 'file-lb' || e.target.id === 'file-other') handleFiles(e.target);
 });
+
+async function restoreBackup(input) {
+  try {
+    const backup = JSON.parse(await input.files[0].text());
+    if (!backup || typeof backup.movies !== 'object') throw new Error('That file is not a backup.');
+    const merged = mergeStates(state, migrate({ ...emptyState(), ...backup }));
+    Object.assign(state, merged, { settings: state.settings });
+    ui.picks = null; persist();
+    ui.status = `Restored ${Object.keys(state.movies).length} films.`; ui.tab = 'library';
+  } catch (e) { ui.status = `Couldn't restore: ${e.message}`; }
+  render();
+}
 
 function finishPlacement() {
   const s = ui.session;
