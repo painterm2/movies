@@ -4,7 +4,7 @@ import { GENRE_IDS } from './moods.js';
 import { movieKey } from './importers.js';
 
 const BASE = 'https://api.themoviedb.org/3';
-export const imageUrl = path => (path ? `https://image.tmdb.org/t/p/w342${path}` : null);
+export const imageUrl = (path, size = 'w342') => (path ? `https://image.tmdb.org/t/p/${size}${path}` : null);
 
 export function normalize(raw) {
   const year = raw.release_date ? parseInt(raw.release_date.slice(0, 4), 10) : null;
