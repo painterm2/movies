@@ -33,16 +33,19 @@ export function mergeStates(a, b) {
   };
 }
 
-export function createSyncClient(pass, fetchImpl = globalThis.fetch) {
-  const headers = { Authorization: `Bearer ${pass}`, 'Content-Type': 'application/json' };
-  async function call(method, body) {
-    const res = await fetchImpl('/api/state', { method, headers, body: body && JSON.stringify(body) });
+// Talks to /api/state and /api/login. Auth is a server-set HttpOnly cookie, sent automatically.
+export function createSyncClient(fetchImpl = globalThis.fetch) {
+  async function call(url, method, body) {
+    const res = await fetchImpl(url, { method, credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' }, body: body && JSON.stringify(body) });
     const data = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(data.error || `Sync failed (${res.status})`);
+    if (!res.ok) throw Object.assign(new Error(data.error || `Sync failed (${res.status})`), { status: res.status });
     return data;
   }
   return {
-    pull: () => call('GET'),
-    push: state => call('PUT', { state: syncPayload(state) }),
+    pull: () => call('/api/state', 'GET'),                       // { state, owner, tmdbProxy }
+    push: state => call('/api/state', 'PUT', { state: syncPayload(state) }),
+    login: passphrase => call('/api/login', 'POST', { passphrase }),
+    logout: () => call('/api/login', 'POST', { logout: true }),
   };
 }

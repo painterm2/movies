@@ -25,7 +25,7 @@ export function normalize(raw) {
   };
 }
 
-// Direct mode: { key } calls TMDB from the browser. Proxy mode: { proxyPass } calls our
+// Direct mode: { key } calls TMDB from the browser. Proxy mode: { proxy: true } calls our
 // /api/tmdb, which holds the key server-side (set TMDB_API_KEY in Vercel).
 export function pickBestMatch(results, title, year) {
   const yearOf = x => parseInt((x.release_date || '').slice(0, 4), 10) || null;
@@ -39,14 +39,14 @@ export function pickBestMatch(results, title, year) {
   return (scored.find(c => c.dy <= 1) || scored.find(c => c.exact))?.x || null;
 }
 
-export function createClient({ key, proxyPass, fetchImpl = globalThis.fetch }) {
+export function createClient({ key, proxy = false, fetchImpl = globalThis.fetch }) {
   const bearer = key && key.length > 40;
   async function get(path, params = {}) {
     let url, init = {};
-    if (proxyPass) {
+    if (proxy) { // the server holds the TMDB key; the owner's session cookie authorizes the call
       url = new URL('/api/tmdb', globalThis.location?.origin || 'http://localhost');
       url.searchParams.set('path', path);
-      init = { headers: { Authorization: `Bearer ${proxyPass}` } };
+      init = { credentials: 'same-origin' };
     } else {
       url = new URL(BASE + path);
       if (!bearer) url.searchParams.set('api_key', key);

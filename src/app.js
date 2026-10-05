@@ -19,45 +19,55 @@ function setTheme(t) {
 setTheme(getTheme());
 
 const state = load();
-const ui = { proxy: false, sync: '', tab: 'recommend', mood: null, loading: '', status: '', session: null, streamOnly: false,
+const ui = { proxy: false, server: false, owner: false, hasRemote: false, authError: '', sync: '', tab: 'recommend', mood: null, loading: '', status: '', session: null, streamOnly: false,
   filters: { genre: '', release: 'any', scope: 'new' }, picks: null, ranked: [], loadToken: 0, recCache: new Map(),
   search: { mode: 'log', key: null, q: '', results: [], note: '' }, enrichError: '', triedPoster: new Set(), enriching: false };
 document.title = BRAND.name;
 document.getElementById('brand').textContent = BRAND.name;
 const $app = document.getElementById('app');
-// ---- sync ---------------------------------------------------------------------
+// ---- sync + sign-in -----------------------------------------------------------
+// Anyone can VIEW the library (the server returns it without sign-in). Only the owner, signed in
+// once per device via a year-long cookie, can change it or use the TMDB proxy.
 let pushTimer = null, syncing = false;
-const syncOn = () => Boolean(state.settings.syncPass);
+const viewOnly = () => ui.server && ui.hasRemote && !ui.owner;
 function persist(touch = true) {
   if (touch) state.updatedAt = Date.now();
   save(state);
-  if (touch && syncOn()) { clearTimeout(pushTimer); pushTimer = setTimeout(syncNow, 1500); }
+  if (touch && ui.owner) { clearTimeout(pushTimer); pushTimer = setTimeout(syncNow, 1500); }
 }
 async function syncNow() {
-  if (!syncOn() || syncing) return;
+  if (syncing) return;
   syncing = true;
   try {
-    const client = createSyncClient(state.settings.syncPass);
-    const { state: remote, tmdbProxy } = await client.pull();
-    ui.proxy = tmdbProxy;
-    let next = state;
-    if (remote) {
-      const merged = mergeStates(state, { ...migrate(remote), settings: state.settings });
-      Object.assign(state, merged, { settings: state.settings });
-      next = state;
+    const client = createSyncClient();
+    const { state: remote, owner, tmdbProxy } = await client.pull();
+    ui.server = true; ui.owner = owner; ui.proxy = tmdbProxy; ui.hasRemote = Boolean(remote);
+    if (remote && !owner) { // viewer: show exactly what the server has
+      Object.assign(state, migrate(remote), { settings: state.settings });
+      save(state);
+    } else if (remote) { // owner: merge with anything edited on this device, then push
+      Object.assign(state, mergeStates(state, { ...migrate(remote), settings: state.settings }), { settings: state.settings });
+      save(state);
     }
-    save(state);
-    await client.push(next);
-    ui.sync = `Synced ${new Date().toLocaleTimeString()}`;
-  } catch (e) { ui.sync = `Sync problem: ${e.message}`; }
+    if (owner) { await client.push(state); ui.sync = `Synced ${new Date().toLocaleTimeString()}`; }
+    else ui.sync = remote ? 'Viewing (read-only)' : '';
+  } catch (e) {
+    if (e.status === 401) { ui.server = true; ui.owner = false; ui.sync = e.message; }
+    else if (e.status !== 503) ui.sync = `Sync problem: ${e.message}`; // 503 = server sync not set up; stay local
+  }
   syncing = false;
   render();
 }
-document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') syncNow(); });
+async function signIn(passphrase) {
+  try { await createSyncClient().login(passphrase); ui.authError = ''; await syncNow(); return true; }
+  catch (e) { ui.authError = e.message; render(); return false; }
+}
+async function signOut() { try { await createSyncClient().logout(); } catch { /* ignore */ } ui.owner = false; ui.proxy = false; await syncNow(); }
+
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-const tmdb = () => (ui.proxy && syncOn() ? createClient({ proxyPass: state.settings.syncPass })
+const tmdb = () => (ui.proxy ? createClient({ proxy: true })
   : state.settings.tmdbKey ? createClient({ key: state.settings.tmdbKey }) : null);
-const isDemo = () => !tmdb();
+const isDemo = () => !tmdb() && !ui.server;
 
 const ICONS = {
   recommend: '<path d="M12 3l2.6 5.6 6.1.7-4.5 4.2 1.2 6L12 16.6 6.6 19.5l1.2-6L3.3 9.3l6.1-.7z"/>',
@@ -151,6 +161,7 @@ async function loadPicks() {
 
 async function buildRanked() {
   const f = ui.filters, mood = ui.mood;
+  if (f.scope === 'new' && viewOnly()) throw new Error('Sign in to get new recommendations, or switch to Rewatch to browse your top films.');
   const exclude = new Set([...watchedKeys(), ...state.hidden]);
   let out;
   if (f.scope === 'rewatch') { // films I've already seen, best-ranked first
@@ -279,7 +290,7 @@ function renderRecommend() {
   if (!n) body = `<div class="empty"><div class="big">🎞️</div><p>Nothing here yet. <a href="#" data-tab-link="log">Log a film you've watched</a> or <a href="#" data-tab-link="import">import your Letterboxd export</a>.</p></div>`;
   else if (ui.loading) body = `<div class="picks">${'<div class="pick skeleton"><div class="pick-poster"><div class="poster"></div></div></div>'.repeat(3)}</div>`;
   else if (ui.picks) body = ui.picks.length ? `<div class="picks">${ui.picks.map(pickHtml).join('')}</div>`
-    : `<div class="empty"><div class="big">🤷</div><p>Nothing matches those filters. Loosen one and try again.</p></div>`;
+    : ui.status ? '' : `<div class="empty"><div class="big">🤷</div><p>Nothing matches those filters. Loosen one and try again.</p></div>`;
   return `<section class="hero"><h2>Next watch</h2>
       <p>Picked for your taste. Tweak the filters and it refreshes on its own.</p></section>
     ${isDemo() ? '<div class="banner">Demo mode: using a small built-in catalog. Connect TMDB (Settings) for real picks and posters.</div>' : ''}
@@ -544,10 +555,13 @@ function renderSettings() {
       <p class="muted">Download a backup of your library and rankings, or restore one (it merges, nothing is lost). Handy for moving to a new web address.</p>
       <div class="row"><button class="secondary" data-act="export">Download backup</button>
         <label class="btn secondary" style="cursor:pointer">Restore from backup<input type="file" id="file-restore" accept=".json,application/json" hidden></label></div></div>
-    <div class="panel"><b>Sync across devices</b>
-      <p class="muted">Enter the passphrase you set as <code>SYNC_PASSWORD</code> in Vercel. Use the same one on every device and your library, rankings and watchlist stay in sync. It's saved only on this device.</p>
-      <input id="s-pass" type="password" size="30" value="${esc(s.syncPass)}" placeholder="Sync passphrase">
-      ${ui.sync ? `<p class="muted">${esc(ui.sync)}</p>` : ''}</div>
+    <div class="panel"><b>Sign in</b>
+      ${ui.owner ? `<p class="muted">✓ Signed in on this device. Your changes save to your library and sync everywhere. You'll stay signed in for a year. ${esc(ui.sync)}</p>
+        <div class="row"><button class="secondary" data-act="logout">Sign out of this device</button></div>`
+      : ui.server ? `<p class="muted">Anyone opening this site sees your library. To change it from this device, sign in once with your passphrase. It won't ask again.</p>
+        <div class="row"><input id="s-pass" type="password" size="30" placeholder="Passphrase" autocomplete="current-password"><button class="primary" data-act="login">Sign in</button></div>
+        ${ui.authError ? `<p class="banner">${esc(ui.authError)}</p>` : ''}`
+      : `<p class="muted">Cross-device sync isn't set up on the server yet (see the README). Until then, data stays in this browser.</p>`}</div>
     <div class="panel"><b>TMDB API key</b>
       ${ui.proxy ? '<p class="muted">✓ The server already has your TMDB key, so you can leave this blank.</p>' : ''}
       <p class="muted">Free at themoviedb.org → Settings → API. Used for posters, genres, recommendations and "where to stream". Stored only in this browser.</p>
@@ -568,6 +582,7 @@ $app.addEventListener('click', async e => {
   if (segBtn) { ui.filters[segBtn.dataset.seg] = segBtn.dataset.v; return loadPicks(); }
   const btn = e.target.closest('[data-act]'); if (!btn) return;
   const { act } = btn.dataset, s = ui.session;
+  if (viewOnly() && !['shuffle', 'theme', 'export', 'login', 'logout', 'goto-signin', 'stream-only'].includes(act)) { ui.tab = 'settings'; return render(); }
   const i = +btn.dataset.i;
   switch (act) {
     case 'shuffle': return shuffle();
@@ -632,6 +647,9 @@ $app.addEventListener('click', async e => {
       mergeIntoLibrary(state, [{ title, year, rating: null, watchedDate: null, source: 'manual' }]);
       persist(); if (!isDemo()) enrichLibrary(); ui.status = `Added ${title}.`; return render();
     }
+    case 'login': return signIn(document.getElementById('s-pass').value);
+    case 'logout': return signOut();
+    case 'goto-signin': ui.tab = 'settings'; return render();
     case 'export': {
       const url = URL.createObjectURL(new Blob([JSON.stringify(syncPayload(state), null, 1)], { type: 'application/json' }));
       Object.assign(document.createElement('a'), { href: url, download: `${BRAND.name.toLowerCase()}-backup-${today()}.json` }).click();
@@ -641,12 +659,11 @@ $app.addEventListener('click', async e => {
     case 'enrich': return enrichLibrary();
     case 'wipe': if (confirm('Erase your library, rankings and settings from this browser?')) { localStorage.clear(); location.reload(); } return;
     case 'save-settings':
-      state.settings.syncPass = document.getElementById('s-pass').value.trim();
       state.settings.tmdbKey = document.getElementById('s-key').value.trim();
       state.settings.region = document.getElementById('s-region').value.trim().toUpperCase() || 'US';
       state.settings.services = document.getElementById('s-services').value.split(',').map(x => x.trim()).filter(Boolean);
       persist(false); ui.status = 'Saved.'; ui.tab = 'recommend';
-      await syncNow(); render(); if (!isDemo()) enrichLibrary(); return;
+      render(); if (!isDemo()) enrichLibrary(); return;
   }
 });
 $app.addEventListener('input', e => {
@@ -654,6 +671,7 @@ $app.addEventListener('input', e => {
   if (e.target.id === 'fix-q') runSearch(e.target.value, 'fix');
 });
 $app.addEventListener('change', e => {
+  if (viewOnly() && /^file-/.test(e.target.id)) return;
   if (e.target.dataset.filter === 'genre') { ui.filters.genre = e.target.value; loadPicks(); }
   if (e.target.id === 'file-restore') restoreBackup(e.target);
   if (e.target.id === 'file-lb' || e.target.id === 'file-other') handleFiles(e.target);
@@ -692,10 +710,21 @@ function finishPlacement() {
   render();
 }
 
+const locked = title => `<section class="hero"><h2>${title}</h2><p>This is a read-only view of the library.</p></section>
+  <div class="panel"><p>Sign in on this device to make changes.</p><div class="row"><button class="primary" data-act="goto-signin">Sign in</button></div></div>`;
+
 function render() {
   renderNav();
   if (ui.tab === 'recommend' && ui.picks === null && !ui.loading && Object.keys(state.movies).length) setTimeout(loadPicks, 0); // auto-recommend
-  $app.innerHTML = { recommend: renderRecommend, log: renderLog, rank: renderRank, library: renderLibrary, import: renderImport, settings: renderSettings }[ui.tab]();
+  const view = { recommend: renderRecommend, log: renderLog, rank: renderRank, library: renderLibrary, import: renderImport, settings: renderSettings };
+  const lock = viewOnly() && ['log', 'rank', 'import'].includes(ui.tab);
+  $app.innerHTML = (viewOnly() && ui.tab !== 'settings' ? `<div class="banner">👀 Read-only. <a href="#" data-tab-link="settings">Sign in</a> on this device to edit.</div>` : '')
+    + (lock ? locked({ log: 'Log a film', rank: 'Rank', import: 'Import' }[ui.tab]) : view[ui.tab]());
 }
 render();
-syncNow().then(() => { if (!isDemo()) enrichLibrary(); }); // pull latest, then fill in posters
+(async () => {
+  const legacy = state.settings.syncPass;
+  if (legacy) { state.settings.syncPass = ''; save(state); await signIn(legacy).catch(() => {}); } // already typed on this device: sign in for them once
+  await syncNow();
+  if (!isDemo()) enrichLibrary();
+})(); // pull latest, then fill in posters

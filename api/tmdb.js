@@ -1,10 +1,10 @@
-import { authorized } from './_auth.js';
+import { isOwner } from './_auth.js';
 
 // Server-side TMDB proxy so the TMDB key lives in a Vercel env var, not in any browser.
 const ALLOWED = /^\/(search\/movie|discover\/movie|movie\/\d+(\/recommendations)?)$/;
 
 export default async function handler(req, res) {
-  if (!authorized(req)) return res.status(401).json({ error: 'Wrong passphrase.' });
+  if (!isOwner(req)) return res.status(401).json({ error: 'Sign in to use recommendations.' });
   const key = process.env.TMDB_API_KEY;
   if (!key) return res.status(503).json({ error: 'TMDB_API_KEY is not set on the server.' });
   const { path, ...rest } = req.query;
