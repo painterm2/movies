@@ -1,8 +1,9 @@
 import { load, save, migrate } from './store.js';
-import { parseExport, mergeIntoLibrary, movieKey, isListExport, parseList } from './importers.js';
+import { parseExport, mergeIntoLibrary, movieKey, norm, isListExport, parseList } from './importers.js';
 import * as R from './ranking.js';
 import { buildProfile, rank as rankCandidates } from './recommend.js';
-import { MOODS, GENRE_NAME_TO_ID } from './moods.js';
+import { MOODS, GENRE_NAME_TO_ID, GENRE_IDS, moodScore } from './moods.js';
+import { BRAND } from './brand.js';
 import { createClient, imageUrl, streamingOn } from './tmdb.js';
 import { DEMO_CATALOG, demoLibrary } from './demo.js';
 import { unzipText, isLetterboxdTasteFile } from './unzip.js';
@@ -18,7 +19,11 @@ function setTheme(t) {
 setTheme(getTheme());
 
 const state = load();
-const ui = { proxy: false, sync: '', tab: 'recommend', mood: null, recs: null, loading: '', status: '', session: null, streamOnly: false };
+const ui = { proxy: false, sync: '', tab: 'recommend', mood: null, loading: '', status: '', session: null, streamOnly: false,
+  filters: { genre: '', release: 'any', scope: 'new' }, picks: null, ranked: [], loadToken: 0, recCache: new Map(),
+  search: { mode: 'log', key: null, q: '', results: [], note: '' }, enrichError: '', triedPoster: new Set(), enriching: false };
+document.title = BRAND.name;
+document.getElementById('brand').textContent = BRAND.name;
 const $app = document.getElementById('app');
 // ---- sync ---------------------------------------------------------------------
 let pushTimer = null, syncing = false;
@@ -58,10 +63,11 @@ const ICONS = {
   recommend: '<path d="M12 3l2.6 5.6 6.1.7-4.5 4.2 1.2 6L12 16.6 6.6 19.5l1.2-6L3.3 9.3l6.1-.7z"/>',
   rank: '<path d="M8 3L4 7l4 4M4 7h16M16 21l4-4-4-4M20 17H4"/>',
   library: '<path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/>',
+  log: '<path d="M12 5v14M5 12h14"/>',
   import: '<path d="M12 3v12M7 10l5 5 5-5M4 21h16"/>',
   settings: '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 00.3 1.8l.1.1a2 2 0 11-2.8 2.8l-.1-.1a1.7 1.7 0 00-1.8-.3 1.7 1.7 0 00-1 1.5V21a2 2 0 11-4 0v-.1a1.7 1.7 0 00-1.1-1.5 1.7 1.7 0 00-1.8.3l-.1.1a2 2 0 11-2.8-2.8l.1-.1a1.7 1.7 0 00.3-1.8 1.7 1.7 0 00-1.5-1H3a2 2 0 110-4h.1a1.7 1.7 0 001.5-1.1 1.7 1.7 0 00-.3-1.8l-.1-.1a2 2 0 112.8-2.8l.1.1a1.7 1.7 0 001.8.3H9a1.7 1.7 0 001-1.5V3a2 2 0 114 0v.1a1.7 1.7 0 001 1.5 1.7 1.7 0 001.8-.3l.1-.1a2 2 0 112.8 2.8l-.1.1a1.7 1.7 0 00-.3 1.8V9a1.7 1.7 0 001.5 1H21a2 2 0 110 4h-.1a1.7 1.7 0 00-1.5 1z"/>',
 };
-const TABS = [['recommend', 'Discover'], ['rank', 'Rank'], ['library', 'My Top'], ['import', 'Import'], ['settings', 'Settings']];
+const TABS = [['recommend', 'Next Watch'], ['log', 'Log'], ['rank', 'Rank'], ['library', 'My Top'], ['import', 'Import'], ['settings', 'Settings']];
 function renderNav() {
   document.getElementById('nav').innerHTML = TABS.map(([id, l]) =>
     `<button class="${ui.tab === id ? 'active' : ''}" data-tab="${id}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${ICONS[id]}</svg>${l}</button>`).join('');
@@ -82,61 +88,147 @@ function profile() {
 const watchedKeys = () => new Set(Object.keys(state.movies));
 
 // ---- TMDB enrichment ----------------------------------------------------------
-async function enrichLibrary() {
-  const api = tmdb(); if (!api) return;
-  const todo = Object.values(state.movies).filter(m => !m.meta);
-  let done = 0;
-  for (const m of todo) {
-    ui.loading = `Looking up films… ${done}/${todo.length}`; render();
-    try {
-      const hit = await api.search(m.title, m.year);
-      if (hit) m.meta = { ...(await api.details(hit.id)), key: m.key };
-    } catch (e) { ui.status = e.message; break; }
-    done++;
-    if (done % 10 === 0) persist();
-  }
-  ui.loading = ''; persist(); render();
+// Re-render without clobbering what the user is typing (background jobs call this).
+function safeRender() {
+  const el = document.activeElement;
+  if (el && $app.contains(el) && /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName)) return;
+  render();
 }
 
-// ---- Recommendations ----------------------------------------------------------
-async function getRecommendations() {
-  ui.loading = 'Finding your next watch…'; ui.recs = null; render();
-  const prof = profile();
-  const exclude = new Set([...watchedKeys(), ...state.hidden]);
-  let candidates;
-  try {
-    candidates = isDemo() ? DEMO_CATALOG.map(meta => ({ meta, sources: [] })) : await fetchCandidates();
-  } catch (e) { ui.status = e.message; candidates = []; }
-  let out = rankCandidates(candidates, prof, { mood: ui.mood, exclude, limit: 60 });
-  if (ui.streamOnly && !isDemo()) {
-    out = out.filter(c => streamingOn(c.meta, state.settings.region, state.settings.services).length);
-  }
-  ui.recs = out.slice(0, 18);
+// Look up TMDB details (poster, synopsis, genres…) for films that lack them. Keeps going
+// past individual failures; only a bad key / missing server key stops the run.
+async function enrichLibrary({ retryMissing = false } = {}) {
+  const api = tmdb(); if (!api || ui.enriching) return;
+  ui.enriching = true; ui.enrichError = '';
+  if (retryMissing) ui.triedPoster.clear();
+  const todo = Object.values(state.movies).filter(m => !m.meta || (!m.meta.poster && !ui.triedPoster.has(m.key)));
+  let done = 0, fatal = false;
+  const worker = async () => {
+    while (todo.length && !fatal) {
+      const m = todo.shift();
+      try {
+        const hit = await api.search(m.title, m.year);
+        if (hit) {
+          const meta = { ...(await api.details(hit.id)), key: m.key };
+          if (!meta.poster && hit.poster_path) meta.poster = hit.poster_path;
+          m.meta = meta;
+        }
+        ui.triedPoster.add(m.key);
+      } catch (e) {
+        if (e.status === 401 || e.status === 503) { ui.enrichError = e.message; fatal = true; }
+        else ui.triedPoster.add(m.key);
+      }
+      ui.loading = `Fetching posters… ${++done}`;
+      if (ui.tab === 'import') safeRender();
+    }
+  };
+  await Promise.all([worker(), worker(), worker(), worker()]); // 4 at a time
+  ui.enriching = false; ui.loading = ''; persist(); safeRender();
+}
+
+// ---- Next Watch ---------------------------------------------------------------
+const GENRES = Object.values(GENRE_IDS).filter(g => g !== 'TV Movie').sort();
+const PICK_COUNT = 4;
+
+function filtersPass(meta) {
+  const f = ui.filters, y = new Date().getFullYear();
+  if (f.genre && !(meta.genres || []).includes(f.genre)) return false;
+  if (f.release === 'new' && !(meta.year >= y - 1)) return false;
+  if (f.release === 'classic' && !(meta.year && meta.year <= 1999)) return false;
+  return true;
+}
+
+async function loadPicks() {
+  const token = ++ui.loadToken;
+  ui.loading = 'Finding your next watch…'; ui.picks = null; ui.status = ''; render();
+  let ranked = [];
+  try { ranked = await buildRanked(); } catch (e) { ui.status = e.message; }
+  if (token !== ui.loadToken) return; // a newer filter change took over
+  ui.ranked = ranked; ui.picks = ranked.slice(0, PICK_COUNT);
   ui.loading = ''; render();
+  fillDetails(token);
+}
+
+async function buildRanked() {
+  const f = ui.filters, mood = ui.mood;
+  const exclude = new Set([...watchedKeys(), ...state.hidden]);
+  let out;
+  if (f.scope === 'rewatch') { // films I've already seen, best-ranked first
+    const sc = scores();
+    out = state.order.map((k, i) => ({ k, i })).filter(({ k }) => state.movies[k]?.meta)
+      .map(({ k, i }) => ({ meta: state.movies[k].meta, score: (sc[k] - 5) / 2, reasons: [`You ranked it #${i + 1}`] }))
+      .filter(c => filtersPass(c.meta) && (!mood || moodScore(mood, c.meta) > 0));
+  } else {
+    const candidates = f.scope === 'watchlist' ? state.watchlist.map(meta => ({ meta, sources: [] }))
+      : isDemo() ? DEMO_CATALOG.map(meta => ({ meta, sources: [] })) : await fetchCandidates();
+    out = rankCandidates(candidates.filter(c => filtersPass(c.meta)), profile(),
+      { mood, exclude: f.scope === 'watchlist' ? new Set(watchedKeys()) : exclude, limit: 200 });
+  }
+  if (ui.streamOnly && !isDemo()) out = out.filter(c => streamingOn(c.meta, state.settings.region, state.settings.services).length);
+  return out;
 }
 
 async function fetchCandidates() {
-  const api = tmdb();
-  const sc = scores();
+  const api = tmdb(), f = ui.filters, y = new Date().getFullYear(), sc = scores();
   const loved = Object.values(state.movies).filter(m => m.meta?.tmdbId && (sc[m.key] ?? 0) >= 7)
     .sort((a, b) => sc[b.key] - sc[a.key]).slice(0, 12);
   const pool = new Map();
+  let firstError = null;
   const add = (meta, source) => {
     const c = pool.get(meta.key) || { meta, sources: [] };
     if (source) c.sources.push(source);
     pool.set(meta.key, c);
   };
-  await Promise.all(loved.map(async m => (await api.recommendations(m.meta.tmdbId)).forEach(r => add(r, m.title))));
-  if (ui.mood?.want.length) {
-    const ids = ui.mood.want.map(g => GENRE_NAME_TO_ID[g]).filter(Boolean);
-    (await api.discover({ genreIds: ids })).forEach(r => add(r, null));
-  }
+  const guard = p => p.catch(e => { firstError ||= e; });
+  const jobs = loved.map(m => guard((async () => {
+    if (!ui.recCache.has(m.meta.tmdbId)) ui.recCache.set(m.meta.tmdbId, await api.recommendations(m.meta.tmdbId));
+    ui.recCache.get(m.meta.tmdbId).forEach(r => add(r, m.title));
+  })()));
+  const genreIds = f.genre ? [GENRE_NAME_TO_ID[f.genre]] : (ui.mood?.want || []).map(g => GENRE_NAME_TO_ID[g]).filter(Boolean);
+  const shape = f.release === 'new' ? { dateGte: `${y - 1}-01-01`, sortBy: 'popularity.desc', minVotes: 100 }
+    : f.release === 'classic' ? { dateLte: '1999-12-31', minVotes: 1500 } : { minVotes: 800 };
+  for (const page of [1, 2]) jobs.push(guard(api.discover({ genreIds, genreMode: f.genre ? 'and' : 'or', page, ...shape }).then(rs => rs.forEach(r => add(r, null)))));
+  await Promise.all(jobs);
+  if (!pool.size && firstError) throw firstError;
   // Fill in runtime / director / streaming for the most promising ones.
-  const prelim = rankCandidates([...pool.values()], profile(), { exclude: new Set([...watchedKeys(), ...state.hidden]), limit: 30 });
+  const exclude = new Set([...watchedKeys(), ...state.hidden]);
+  const prelim = rankCandidates([...pool.values()].filter(c => filtersPass(c.meta)), profile(), { mood: ui.mood, exclude, limit: 30 });
   await Promise.all(prelim.map(async c => {
     try { c.meta = { ...c.meta, ...(await api.details(c.meta.tmdbId)) }; } catch { /* keep partial */ }
   }));
   return prelim.map(({ meta, sources }) => ({ meta, sources }));
+}
+
+// Make sure the shown picks have a synopsis (rewatch/watchlist metas may lack one).
+async function fillDetails(token) {
+  const api = tmdb(); if (!api) return;
+  const need = (ui.picks || []).filter(c => c.meta.tmdbId && !c.meta.overview);
+  if (!need.length) return;
+  await Promise.all(need.map(async c => { try { c.meta = { ...c.meta, ...(await api.details(c.meta.tmdbId)) }; } catch { /* ignore */ } }));
+  if (token === ui.loadToken) safeRender();
+}
+
+// Weighted random sample from the top of the ranking, so "Shuffle" varies but stays on-taste.
+function shuffle() {
+  const pool = ui.ranked.slice(0, 16);
+  if (!pool.length) return;
+  const top = Math.max(...pool.map(c => c.score));
+  const bag = pool.map(c => ({ c, w: Math.exp(1.2 * (c.score - top)) }));
+  const picks = [];
+  while (picks.length < Math.min(PICK_COUNT, pool.length)) {
+    let r = Math.random() * bag.reduce((a, x) => a + x.w, 0), i = 0;
+    while (i < bag.length - 1 && (r -= bag[i].w) > 0) i++;
+    picks.push(bag.splice(i, 1)[0].c);
+  }
+  ui.picks = picks; render();
+}
+
+// Remove a pick and pull the next-best into its place.
+function dropPick(i) {
+  const [gone] = ui.picks.splice(i, 1);
+  ui.ranked = ui.ranked.filter(c => c !== gone);
+  const next = ui.ranked.find(c => !ui.picks.includes(c));
+  if (next) ui.picks.push(next);
 }
 
 // Fallback tint by genre so a missing poster still "feels" like the film.
@@ -156,39 +248,114 @@ function poster(meta, title, sizes = '(max-width:720px) 46vw, 200px') {
   return `<div class="poster" style="background:${tint(meta, title)}"><span class="ptitle">${esc(title)}</span>${img}</div>`;
 }
 
-function cardHtml(c, i) {
+function pickHtml(c, i) {
   const m = c.meta;
   const on = streamingOn(m, state.settings.region, state.settings.services);
-  return `<article class="tile">
-    ${poster(m, m.title)}
-    <h3>${esc(m.title)}</h3>
-    <div class="meta">${esc(m.year)} · ${esc((m.genres || []).slice(0, 2).join(', '))}${m.runtime ? ` · ${m.runtime}m` : ''}</div>
-    ${(c.reasons || []).slice(0, 1).map(r => `<div class="why">${esc(r)}</div>`).join('')}
-    ${on.length ? `<div class="stream">▶ ${esc(on.slice(0, 2).join(', '))}</div>` : ''}
-    <div class="actions">
-      <button class="chip-btn" data-act="seen" data-i="${i}">Seen it</button>
-      <button class="chip-btn" data-act="watchlist" data-i="${i}">+ List</button>
-      <button class="chip-btn quiet" data-act="hide" data-i="${i}" aria-label="Not interested" title="Not interested">✕</button>
+  const scope = ui.filters.scope;
+  return `<article class="pick${i === 0 ? ' first' : ''}">
+    <div class="pick-poster">${poster(m, m.title, '(max-width:720px) 32vw, 190px')}</div>
+    <div class="pick-body">
+      <h3>${esc(m.title)}</h3>
+      <div class="meta">${esc(m.year)}${m.runtime ? ` · ${m.runtime} min` : ''} · ${esc((m.genres || []).slice(0, 3).join(', '))}</div>
+      ${(c.reasons || []).slice(0, 2).map(r => `<div class="why">${esc(r)}</div>`).join('')}
+      ${m.overview ? `<p class="synopsis">${esc(m.overview)}</p>` : ''}
+      ${on.length ? `<div class="stream">▶ Streaming on ${esc(on.slice(0, 3).join(', '))}</div>` : ''}
+      ${scope === 'rewatch' ? '' : `<div class="actions">
+        <button class="chip-btn" data-act="seen" data-i="${i}">I've seen it</button>
+        ${scope === 'watchlist' ? `<button class="chip-btn" data-act="unlist" data-i="${i}">Remove</button>`
+          : `<button class="chip-btn" data-act="watchlist" data-i="${i}">+ Watchlist</button>`}
+        <button class="chip-btn quiet" data-act="hide" data-i="${i}" aria-label="Not interested" title="Not interested">✕</button>
+      </div>`}
     </div></article>`;
 }
+
+const seg = (name, opts) => `<div class="seg" role="group">${opts.map(([v, l]) =>
+  `<button class="${ui.filters[name] === v ? 'on' : ''}" data-seg="${name}" data-v="${v}">${l}</button>`).join('')}</div>`;
 
 function renderRecommend() {
   const moods = MOODS.map(m => `<button class="mood ${ui.mood?.id === m.id ? 'active' : ''}" data-mood="${m.id}">${m.emoji} ${esc(m.label)}</button>`).join('');
   const n = Object.keys(state.movies).length;
   let body = '';
-  if (!n) body = `<div class="empty"><div class="big">🎞️</div><p>Nothing here yet. <a href="#" data-tab-link="import">Import your Letterboxd export</a> to get started.</p></div>`;
-  else if (ui.loading) body = `<div class="tiles">${'<div class="tile skeleton"><div class="poster"></div></div>'.repeat(8)}</div><p class="muted center">${esc(ui.loading)}</p>`;
-  else if (ui.recs) body = ui.recs.length ? `<div class="tiles">${ui.recs.map(cardHtml).join('')}</div>` : '<div class="empty"><div class="big">🤷</div><p>Nothing matched that mood. Try another.</p></div>';
-  return `<section class="hero"><h2>What should we watch tonight?</h2>
-      <p>Picks tuned to the films you've loved. Choose a mood to steer them.</p></section>
-    ${isDemo() ? '<div class="banner">Demo mode: using a small built-in catalog. Add your TMDB key (Settings) for real picks and posters.</div>' : ''}
+  if (!n) body = `<div class="empty"><div class="big">🎞️</div><p>Nothing here yet. <a href="#" data-tab-link="log">Log a film you've watched</a> or <a href="#" data-tab-link="import">import your Letterboxd export</a>.</p></div>`;
+  else if (ui.loading) body = `<div class="picks">${'<div class="pick skeleton"><div class="pick-poster"><div class="poster"></div></div></div>'.repeat(3)}</div>`;
+  else if (ui.picks) body = ui.picks.length ? `<div class="picks">${ui.picks.map(pickHtml).join('')}</div>`
+    : `<div class="empty"><div class="big">🤷</div><p>Nothing matches those filters. Loosen one and try again.</p></div>`;
+  return `<section class="hero"><h2>Next watch</h2>
+      <p>Picked for your taste. Tweak the filters and it refreshes on its own.</p></section>
+    ${isDemo() ? '<div class="banner">Demo mode: using a small built-in catalog. Connect TMDB (Settings) for real picks and posters.</div>' : ''}
     <div class="moods">${moods}</div>
-    <div class="row">
-      <button class="primary" data-act="recommend">${ui.mood ? `Find ${esc(ui.mood.label.toLowerCase())} picks` : 'Recommend for my taste'}</button>
-      ${ui.mood ? '<button class="ghost" data-act="clear-mood">Clear mood</button>' : ''}
-      ${isDemo() ? '' : `<label class="toggle"><input type="checkbox" data-act="stream-only" ${ui.streamOnly ? 'checked' : ''}> Only on my services</label>`}
+    <div class="filters">
+      <label class="select"><span class="muted">Genre</span><select data-filter="genre"><option value="">Any genre</option>${GENRES.map(g => `<option ${ui.filters.genre === g ? 'selected' : ''}>${esc(g)}</option>`).join('')}</select></label>
+      <div><span class="muted">Release</span>${seg('release', [['any', 'Any'], ['new', 'New'], ['classic', 'Classics']])}</div>
+      <div><span class="muted">Show me</span>${seg('scope', [['new', 'New to me'], ['watchlist', `Watchlist${state.watchlist.length ? ` (${state.watchlist.length})` : ''}`], ['rewatch', 'Rewatch']])}</div>
+      <button class="primary shuffle" data-act="shuffle" ${ui.ranked.length > 1 ? '' : 'disabled'}>🔀 Shuffle</button>
     </div>
+    ${isDemo() ? '' : `<label class="toggle"><input type="checkbox" data-act="stream-only" ${ui.streamOnly ? 'checked' : ''}> Only on my streaming services</label>`}
     ${ui.status ? `<p class="banner">${esc(ui.status)}</p>` : ''}${body}`;
+}
+
+// ---- Log a film ---------------------------------------------------------------
+const today = () => new Date().toISOString().slice(0, 10);
+
+function searchResultsHtml() {
+  const { results, q, note, mode } = ui.search;
+  const rows = results.map((m, i) => `<div class="result">
+      <div class="thumb">${poster(m, m.title, '56px')}</div>
+      <div class="info"><div class="t">${esc(m.title)} <span class="muted">${esc(m.year ?? '')}</span></div>
+        <div class="muted clamp">${esc(m.overview || (m.genres || []).join(', '))}</div></div>
+      <button class="chip-btn" data-act="${mode === 'fix' ? 'fix-pick' : 'log-pick'}" data-i="${i}">${mode === 'fix' ? 'Use this' : 'I watched this'}</button>
+    </div>`).join('');
+  const manual = q.trim() && mode === 'log' ? `<div class="result"><div class="info"><div class="t">Not listed?</div><div class="muted">Add "${esc(q.trim())}" without a lookup</div></div>
+      <button class="chip-btn" data-act="log-manual">Add</button></div>` : '';
+  return `${note ? `<p class="muted">${esc(note)}</p>` : ''}${rows}${manual}`;
+}
+
+function renderLog() {
+  const recent = Object.values(state.movies).filter(m => m.sources?.includes('logged'))
+    .sort((a, b) => (b.watchedDate || '').localeCompare(a.watchedDate || '')).slice(0, 5);
+  const pos = Object.fromEntries(state.order.map((k, i) => [k, i + 1]));
+  return `<section class="hero"><h2>Log a film</h2><p>Just watched something? Add it here and rank it. No need to touch Letterboxd.</p></section>
+    ${ui.status ? `<p class="banner">${esc(ui.status)}</p>` : ''}
+    <div class="panel">
+      <input id="log-q" type="search" class="wide" placeholder="Search for a film…" autocomplete="off" value="${ui.search.mode === 'log' ? esc(ui.search.q) : ''}">
+      <div class="row"><label class="muted">Watched on <input type="date" id="log-date" value="${today()}" max="${today()}"></label></div>
+      <div id="log-results">${ui.search.mode === 'log' ? searchResultsHtml() : ''}</div>
+    </div>
+    ${recent.length ? `<h3 class="sub">Recently logged</h3><ul class="plain">${recent.map(m => `<li>${esc(m.title)} <span class="muted">${esc(m.year ?? '')}${pos[m.key] ? ` · #${pos[m.key]}` : ''}</span></li>`).join('')}</ul>` : ''}`;
+}
+
+let searchTimer = null;
+function runSearch(q, mode) {
+  ui.search = { ...ui.search, mode, q, results: [], note: '' };
+  clearTimeout(searchTimer);
+  const target = () => document.getElementById(mode === 'fix' ? 'fix-results' : 'log-results');
+  if (q.trim().length < 2) { if (target()) target().innerHTML = ''; return; }
+  searchTimer = setTimeout(async () => {
+    const mine = ui.search.q;
+    try {
+      const api = tmdb();
+      const results = api ? await api.searchMany(q)
+        : DEMO_CATALOG.filter(m => norm(m.title).includes(norm(q)) ).slice(0, 8);
+      if (mine !== ui.search.q) return; // typed something newer meanwhile
+      ui.search.results = results;
+      ui.search.note = results.length ? '' : 'No matches.';
+    } catch (e) { ui.search.note = e.message; }
+    if (target()) target().innerHTML = searchResultsHtml();
+  }, 300);
+}
+
+// Add a film I just watched, then go straight to ranking it.
+function logFilm(meta, date) {
+  const key = movieKey(meta.title, meta.year);
+  const existing = state.movies[key];
+  state.movies[key] = existing ? { ...existing, meta: { ...meta, key }, watchedDate: date }
+    : { key, title: meta.title, year: meta.year, rating: null, watchedDate: date, sources: ['logged'], meta: { ...meta, key } };
+  persist();
+  const api = tmdb(); // fill runtime / director / streaming in the background
+  if (api && meta.tmdbId) api.details(meta.tmdbId).then(d => { state.movies[key].meta = { ...state.movies[key].meta, ...d, key }; persist(); }).catch(() => {});
+  ui.picks = null; ui.search = { mode: 'log', key: null, q: '', results: [], note: '' };
+  if (existing && R.isRanked(state.order, key)) { ui.status = `${meta.title} is already on your list (#${state.order.indexOf(key) + 1}).`; return render(); }
+  startRanking(key);
 }
 
 // ---- Rank (Beli-style) --------------------------------------------------------
@@ -296,6 +463,21 @@ function renderLibrary() {
 }
 
 // ---- Import -------------------------------------------------------------------
+function posterHealthHtml() {
+  const all = Object.values(state.movies);
+  if (!all.length || isDemo()) return '';
+  const missing = all.filter(m => !m.meta?.poster);
+  return `<div class="panel"><b>Posters</b>
+    <p class="muted">${all.length - missing.length} of ${all.length} films have a poster.${ui.enriching ? ` ${esc(ui.loading)}` : ''}</p>
+    ${ui.enrichError ? `<p class="banner">${esc(ui.enrichError)} Check your TMDB key (Settings, or <code>TMDB_API_KEY</code> in Vercel).</p>` : ''}
+    <div class="row"><button class="secondary" data-act="fix-posters" ${ui.enriching ? 'disabled' : ''}>${missing.length ? 'Retry missing posters' : 'Refresh all details'}</button></div>
+    ${missing.slice(0, 12).map(m => `<div class="result"><div class="info"><div class="t">${esc(m.title)} <span class="muted">${esc(m.year ?? '')}</span></div></div>
+      <button class="chip-btn" data-act="fix-open" data-key="${esc(m.key)}">Find</button></div>`).join('')}
+    ${ui.search.mode === 'fix' && ui.search.key ? `<div class="fixbox"><p class="muted">Pick the right film for <b>${esc(state.movies[ui.search.key]?.title)}</b>:</p>
+      <input id="fix-q" type="search" class="wide" value="${esc(ui.search.q)}" autocomplete="off"><div id="fix-results">${searchResultsHtml()}</div></div>` : ''}
+  </div>`;
+}
+
 function renderImport() {
   const n = Object.keys(state.movies).length;
   return `<section class="hero"><h2>Bring in your history</h2><p>Your data stays in your account. Nothing is shared.</p></section>
@@ -308,6 +490,7 @@ function renderImport() {
     <div class="panel"><b>Add a film manually</b>
       <div class="row"><input id="m-title" placeholder="Title"><input id="m-year" placeholder="Year" size="5">
       <button class="secondary" data-act="add-manual">Add</button></div></div>
+    ${posterHealthHtml()}
     <div class="panel"><b>Library:</b> ${n} films
       <div class="row">
         <button class="secondary" data-act="demo">Load demo library</button>
@@ -340,6 +523,7 @@ async function handleFiles(input) {
     const r = mergeIntoLibrary(state, items);
     msgs.push(`${f.name}: ${items.length} rows (${source}), ${r.added} new`);
   }
+  ui.picks = null;
   R.seedFromRatings(state.order, state.movies);
   R.applyFavoritesOrder(state.order, state.favorites || [], new Set(Object.keys(state.movies)));
   persist();
@@ -375,20 +559,38 @@ $app.addEventListener('click', async e => {
   const link = e.target.closest('[data-tab-link]');
   if (link) { e.preventDefault(); ui.tab = link.dataset.tabLink; ui.status = ''; return render(); }
   const mood = e.target.closest('[data-mood]');
-  if (mood) { ui.mood = MOODS.find(m => m.id === mood.dataset.mood); return render(); }
+  if (mood) { const m = MOODS.find(x => x.id === mood.dataset.mood); ui.mood = ui.mood?.id === m.id ? null : m; return loadPicks(); }
+  const segBtn = e.target.closest('[data-seg]');
+  if (segBtn) { ui.filters[segBtn.dataset.seg] = segBtn.dataset.v; return loadPicks(); }
   const btn = e.target.closest('[data-act]'); if (!btn) return;
   const { act } = btn.dataset, s = ui.session;
   const i = +btn.dataset.i;
   switch (act) {
-    case 'recommend': return getRecommendations();
-    case 'clear-mood': ui.mood = null; return render();
-    case 'stream-only': ui.streamOnly = btn.checked; return;
-    case 'hide': state.hidden.push(ui.recs[i].meta.key); ui.recs.splice(i, 1); persist(); return render();
-    case 'watchlist': state.watchlist.push(ui.recs[i].meta); ui.recs.splice(i, 1); persist(); return render();
+    case 'shuffle': return shuffle();
+    case 'stream-only': ui.streamOnly = btn.checked; return loadPicks();
+    case 'hide': state.hidden.push(ui.picks[i].meta.key); dropPick(i); persist(); return render();
+    case 'watchlist': state.watchlist.push(ui.picks[i].meta); dropPick(i); persist(); return render();
+    case 'unlist': state.watchlist = state.watchlist.filter(m => m.key !== ui.picks[i].meta.key); dropPick(i); persist(); return render();
     case 'seen': {
-      const meta = ui.recs[i].meta;
-      state.movies[meta.key] = { key: meta.key, title: meta.title, year: meta.year, rating: null, watchedDate: null, sources: ['recommendation'], meta };
-      ui.recs.splice(i, 1); persist(); return startRanking(meta.key); // "what did you think?"
+      const meta = ui.picks[i].meta;
+      state.watchlist = state.watchlist.filter(m => m.key !== meta.key);
+      logFilm(meta, today()); // "what did you think?" starts the ranking
+      return;
+    }
+    case 'log-pick': return logFilm(ui.search.results[i], document.getElementById('log-date')?.value || today());
+    case 'log-manual': {
+      const q = ui.search.q.trim(); if (!q) return;
+      const m = /^(.*?)\s*\((\d{4})\)$/.exec(q); // "Heat (1995)"
+      return logFilm({ title: m ? m[1] : q, year: m ? +m[2] : null, genres: [], directors: [], poster: null, overview: '' }, document.getElementById('log-date')?.value || today());
+    }
+    case 'fix-posters': return enrichLibrary({ retryMissing: true });
+    case 'fix-open': ui.search = { mode: 'fix', key: btn.dataset.key, q: state.movies[btn.dataset.key].title, results: [], note: '' }; render(); return runSearch(ui.search.q, 'fix');
+    case 'fix-pick': {
+      const key = ui.search.key, meta = ui.search.results[i];
+      state.movies[key].meta = { ...meta, key }; ui.search = { mode: 'log', key: null, q: '', results: [], note: '' };
+      persist(); render();
+      const api = tmdb(); if (api && meta.tmdbId) api.details(meta.tmdbId).then(d => { state.movies[key].meta = { ...state.movies[key].meta, ...d, key }; persist(); safeRender(); }).catch(() => {});
+      return;
     }
     case 'rank-next': { const k = nextToRank(); return k && startRanking(k); }
     case 'rank-stop': ui.session = null; persist(); return render();
@@ -426,7 +628,7 @@ $app.addEventListener('click', async e => {
       mergeIntoLibrary(state, [{ title, year, rating: null, watchedDate: null, source: 'manual' }]);
       persist(); if (!isDemo()) enrichLibrary(); ui.status = `Added ${title}.`; return render();
     }
-    case 'demo': Object.assign(state.movies, demoLibrary()); R.seedFromRatings(state.order, state.movies); persist(); ui.status = 'Demo library loaded.'; return render();
+    case 'demo': ui.picks = null; Object.assign(state.movies, demoLibrary()); R.seedFromRatings(state.order, state.movies); persist(); ui.status = 'Demo library loaded.'; return render();
     case 'enrich': return enrichLibrary();
     case 'wipe': if (confirm('Erase your library, rankings and settings from this browser?')) { localStorage.clear(); location.reload(); } return;
     case 'save-settings':
@@ -438,8 +640,12 @@ $app.addEventListener('click', async e => {
       await syncNow(); render(); if (!isDemo()) enrichLibrary(); return;
   }
 });
+$app.addEventListener('input', e => {
+  if (e.target.id === 'log-q') runSearch(e.target.value, 'log');
+  if (e.target.id === 'fix-q') runSearch(e.target.value, 'fix');
+});
 $app.addEventListener('change', e => {
-  if (e.target.matches('[data-act="stream-only"]')) ui.streamOnly = e.target.checked;
+  if (e.target.dataset.filter === 'genre') { ui.filters.genre = e.target.value; loadPicks(); }
   if (e.target.id === 'file-lb' || e.target.id === 'file-other') handleFiles(e.target);
 });
 
@@ -454,7 +660,7 @@ function finishPlacement() {
     return nextRerank();
   }
   R.insertAt(state.order, s.key, pos);
-  persist();
+  persist(); ui.picks = null;
   const m = state.movies[s.key];
   ui.status = `${m.title} is now #${pos + 1} of ${state.order.length}.`;
   const k = nextToRank();
@@ -466,7 +672,8 @@ function finishPlacement() {
 
 function render() {
   renderNav();
-  $app.innerHTML = { recommend: renderRecommend, rank: renderRank, library: renderLibrary, import: renderImport, settings: renderSettings }[ui.tab]();
+  if (ui.tab === 'recommend' && ui.picks === null && !ui.loading && Object.keys(state.movies).length) setTimeout(loadPicks, 0); // auto-recommend
+  $app.innerHTML = { recommend: renderRecommend, log: renderLog, rank: renderRank, library: renderLibrary, import: renderImport, settings: renderSettings }[ui.tab]();
 }
 render();
-syncNow().then(() => { if (!isDemo() && Object.values(state.movies).some(m => !m.meta)) enrichLibrary(); }); // pull latest, then fill in posters
+syncNow().then(() => { if (!isDemo()) enrichLibrary(); }); // pull latest, then fill in posters

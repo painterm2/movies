@@ -1,4 +1,4 @@
-# Reel Taste
+# Kinora
 
 A personal movie site: import what you've watched, rank it Beli-style, and get recommendations tuned to your taste and your mood.
 

@@ -32,9 +32,11 @@ export function pickBestMatch(results, title, year) {
   const scored = results.map((x, i) => {
     const exact = norm(x.title || '') === norm(title) || norm(x.original_title || '') === norm(title);
     const dy = year && yearOf(x) ? Math.abs(yearOf(x) - year) : 0;
-    return { x, score: (exact ? 100 : 0) - dy * 10 - i * 0.5 - (year && !yearOf(x) ? 5 : 0), dy };
-  }).filter(c => c.dy <= 1).sort((a, b) => b.score - a.score);
-  return scored[0]?.x || null;
+    return { x, exact, dy, score: (exact ? 100 : 0) - dy * 10 - i * 0.5 - (year && !yearOf(x) ? 5 : 0) };
+  }).sort((a, b) => b.score - a.score);
+  // Prefer a year within one of Letterboxd's; failing that, an exact-title match from any year
+  // (better a poster for the right title than none at all).
+  return (scored.find(c => c.dy <= 1) || scored.find(c => c.exact))?.x || null;
 }
 
 export function createClient({ key, proxyPass, fetchImpl = globalThis.fetch }) {
@@ -52,23 +54,36 @@ export function createClient({ key, proxyPass, fetchImpl = globalThis.fetch }) {
     }
     for (const [k, v] of Object.entries(params)) url.searchParams.set(k, v);
     const res = await fetchImpl(url, init);
-    if (res.status === 401) throw new Error('TMDB rejected the API key.');
-    if (!res.ok) throw new Error(`TMDB error ${res.status}`);
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      const msg = body.error || body.status_message || (res.status === 401 ? 'TMDB rejected the API key.' : `TMDB error ${res.status}`);
+      throw Object.assign(new Error(msg), { status: res.status });
+    }
     return res.json();
   }
   return {
     // Letterboxd and TMDB sometimes disagree on the year by one, so don't trust a strict
     // year filter: search by title, then prefer exact title + nearest year.
     async search(title, year) {
-      const r = await get('/search/movie', { query: title });
-      return pickBestMatch(r.results || [], title, year);
+      let r = await get('/search/movie', { query: title });
+      let hit = pickBestMatch(r.results || [], title, year);
+      if (!hit && /[:.\u2013-]/.test(title)) { // retry without a subtitle, e.g. "Star Wars: A New Hope"
+        r = await get('/search/movie', { query: title.split(/[:\u2013-]/)[0].trim() });
+        hit = pickBestMatch(r.results || [], title.split(/[:\u2013-]/)[0].trim(), year);
+      }
+      return hit;
     },
+    // Free-text search for the Log screen: several candidates, already normalized.
+    searchMany: async query => (await get('/search/movie', { query })).results.slice(0, 8).map(normalize),
     details: id => get(`/movie/${id}`, { append_to_response: 'credits,watch/providers' }).then(normalize),
     recommendations: id => get(`/movie/${id}/recommendations`).then(r => r.results.map(normalize)),
-    discover: ({ genreIds = [], minVotes = 500, page = 1 } = {}) =>
+    // genreMode 'or' = any of the genres, 'and' = all of them.
+    discover: ({ genreIds = [], genreMode = 'or', minVotes = 500, page = 1, sortBy = 'vote_average.desc', dateGte, dateLte } = {}) =>
       get('/discover/movie', {
-        with_genres: genreIds.join('|'), sort_by: 'vote_average.desc',
-        'vote_count.gte': minVotes, page,
+        ...(genreIds.length ? { with_genres: genreIds.join(genreMode === 'and' ? ',' : '|') } : {}),
+        sort_by: sortBy, 'vote_count.gte': minVotes, page,
+        ...(dateGte ? { 'primary_release_date.gte': dateGte } : {}),
+        ...(dateLte ? { 'primary_release_date.lte': dateLte } : {}),
       }).then(r => r.results.map(normalize)),
   };
 }

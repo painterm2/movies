@@ -37,9 +37,10 @@ test('mood filters clashing genres and honors runtime', () => {
 });
 
 import { pickBestMatch } from '../src/tmdb.js';
-test('tmdb match prefers exact title and tolerates a 1-year mismatch, rejects far years', () => {
+test('tmdb match prefers exact title + nearest year; falls back to exact title; never a wrong title', () => {
   const rs = [{ title: 'Heat (remake)', release_date: '2020-01-01' }, { title: 'Heat', release_date: '1995-12-15' }, { title: 'Heat', release_date: '1986-01-01' }];
   assert.equal(pickBestMatch(rs, 'Heat', 1996).release_date, '1995-12-15');
-  assert.equal(pickBestMatch(rs, 'Heat', 1900), null);
+  assert.equal(pickBestMatch(rs, 'Heat', 2005).release_date, '1995-12-15'); // exact title, far year: still better than no poster
+  assert.equal(pickBestMatch([{ title: 'Something Else', release_date: '1990-01-01' }], 'Heat', 1995), null);
   assert.equal(pickBestMatch(rs, 'Heat', null).release_date, '1995-12-15');
 });
