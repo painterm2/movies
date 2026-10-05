@@ -7,6 +7,7 @@ const KEY = 'reel-taste:v1';
 export const emptyState = () => ({
   movies: {},            // key -> { key, title, year, rating, watchedDate, sources, meta }
   rank: emptyRank(),
+  favorites: [],         // ordered keys from an imported favourites list
   hidden: [],            // keys the user dismissed
   watchlist: [],         // saved candidate metas
   settings: { tmdbKey: '', region: 'US', services: [] },

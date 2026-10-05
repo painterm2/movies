@@ -1,5 +1,5 @@
 import { load, save } from './store.js';
-import { parseExport, mergeIntoLibrary, movieKey } from './importers.js';
+import { parseExport, mergeIntoLibrary, movieKey, isListExport, parseList } from './importers.js';
 import * as R from './ranking.js';
 import { buildProfile, rank as rankCandidates } from './recommend.js';
 import { MOODS, GENRE_NAME_TO_ID } from './moods.js';
@@ -189,7 +189,7 @@ function renderImport() {
   const n = Object.keys(state.movies).length;
   return `<h2>Import what you've watched</h2>
     <div class="panel"><b>Letterboxd</b>
-      <p class="muted">Letterboxd has no public API, so use your own data export: Settings → Data → Export Your Data. Upload <code>ratings.csv</code>, <code>watched.csv</code> and/or <code>diary.csv</code> from the zip.</p>
+      <p class="muted">Letterboxd has no public API, so use your own data export: Settings → Data → Export Your Data. Upload <code>ratings.csv</code>, <code>watched.csv</code> and/or <code>diary.csv</code> from the zip. Optionally add <code>lists/top-10.csv</code> (or any ranked list) to pin your favourites at the top.</p>
       <input type="file" id="file-lb" accept=".csv" multiple></div>
     <div class="panel"><b>Netflix (or any streaming CSV)</b>
       <p class="muted">Netflix: Account → Profile → Viewing activity → Download all. Series episodes are skipped automatically. Any CSV with a <code>Title</code> or <code>Name</code> column works (optional <code>Year</code>, <code>Rating</code>). Most other services don't offer a history export; add titles by hand below.</p>
@@ -208,10 +208,21 @@ function renderImport() {
 async function handleFiles(input) {
   const msgs = [];
   for (const f of input.files) {
-    const { source, items } = parseExport(await f.text());
+    const text = await f.text();
+    if (isListExport(text)) { // ordered favourites list, e.g. Letterboxd Top 10
+      const listed = parseList(text);
+      mergeIntoLibrary(state, listed.map(x => ({ ...x, rating: null, watchedDate: null, source: 'letterboxd-list' })));
+      const keys = listed.map(x => movieKey(x.title, x.year));
+      state.favorites = keys;
+      msgs.push(`${f.name}: favourites list of ${keys.length}`);
+      continue;
+    }
+    const { source, items } = parseExport(text);
     const r = mergeIntoLibrary(state, items);
     msgs.push(`${f.name}: ${items.length} rows (${source}), ${r.added} new`);
   }
+  R.seedFromRatings(state.rank, state.movies);
+  R.applyFavoritesOrder(state.rank, state.favorites || []);
   persist();
   ui.status = msgs.join(' · ') + (isDemo() ? '' : ' — looking up details…');
   render();

@@ -49,3 +49,9 @@ test('refine swap', () => {
   R.swapPair(rank, pair);
   assert.deepEqual(rank.loved, ['b', 'a', 'c']);
 });
+
+test('favorites order pins listed films to the top of their bucket', () => {
+  const rank = { loved: ['a', 'b', 'c', 'd'], liked: ['e'], meh: [] };
+  R.applyFavoritesOrder(rank, ['c', 'missing', 'a', 'e']);
+  assert.deepEqual(rank, { loved: ['c', 'a', 'b', 'd'], liked: ['e'], meh: [] });
+});

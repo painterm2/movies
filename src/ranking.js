@@ -94,3 +94,12 @@ export function swapPair(rank, pair) {
   const list = rank[pair.bucket];
   [list[pair.i], list[pair.i + 1]] = [list[pair.i + 1], list[pair.i]];
 }
+
+// Pin an ordered favourites list (e.g. a Letterboxd "Top 10") to the top of the buckets
+// the films already sit in, preserving the list's order. Keys not ranked are ignored.
+export function applyFavoritesOrder(rank, orderedKeys) {
+  for (const b of BUCKET_ORDER) {
+    const pinned = orderedKeys.filter(k => rank[b].includes(k));
+    rank[b] = [...pinned, ...rank[b].filter(k => !pinned.includes(k))];
+  }
+}

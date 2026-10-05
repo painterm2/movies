@@ -35,3 +35,10 @@ test('netflix import drops series episodes and merges year-less titles', () => {
   assert.equal(r.added, 0);
   assert.equal(Object.keys(lib.movies).length, 1);
 });
+
+import { isListExport, parseList } from '../src/importers.js';
+test('letterboxd list export keeps order and skips preamble', () => {
+  const t = 'Letterboxd list export v7\nDate,Name,Tags,URL,Description\n2024-02-03,Top 10,,u,\n\nPosition,Name,Year,URL,Description\n2,B,2000,u,\n1,A,1999,u,\n';
+  assert.ok(isListExport(t));
+  assert.deepEqual(parseList(t).map(x => x.title), ['A', 'B']);
+});

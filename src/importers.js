@@ -74,3 +74,17 @@ export function mergeIntoLibrary(library, items) {
   }
   return { added, updated };
 }
+
+// Letterboxd list export (e.g. lists/top-10.csv): a metadata preamble, then a
+// "Position,Name,Year,URL,Description" table. Returns films in list order.
+export function isListExport(text) {
+  return /^﻿?Letterboxd list export/.test(text);
+}
+export function parseList(text) {
+  const at = text.search(/^Position,/m);
+  if (at < 0) return [];
+  return parseCSVObjects(text.slice(at))
+    .map(r => ({ title: r.Name, year: parseInt(r.Year, 10) || null, position: parseInt(r.Position, 10) }))
+    .filter(r => r.title)
+    .sort((a, b) => a.position - b.position);
+}
