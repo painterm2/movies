@@ -1,0 +1,29 @@
+:root { --bg:#fafaf9; --fg:#1c1917; --muted:#78716c; --card:#fff; --line:#e7e5e4; --accent:#e11d48; --accent-fg:#fff; }
+@media (prefers-color-scheme: dark) {
+  :root { --bg:#0c0a09; --fg:#f5f5f4; --muted:#a8a29e; --card:#1c1917; --line:#292524; }
+}
+* { box-sizing: border-box; }
+body { margin:0; background:var(--bg); color:var(--fg); font:16px/1.5 system-ui, sans-serif; }
+header { display:flex; flex-wrap:wrap; gap:8px 24px; align-items:center; padding:12px 16px; border-bottom:1px solid var(--line); }
+h1 { font-size:20px; margin:0; }
+nav { display:flex; gap:4px; flex-wrap:wrap; }
+button, .chip { font:inherit; border:1px solid var(--line); background:var(--card); color:var(--fg); padding:6px 12px; border-radius:999px; cursor:pointer; }
+button:hover { border-color:var(--accent); }
+button.active, button.primary { background:var(--accent); color:var(--accent-fg); border-color:var(--accent); }
+button.ghost { border-color:transparent; background:none; color:var(--muted); }
+main { max-width:960px; margin:0 auto; padding:16px; }
+h2 { margin:8px 0 12px; }
+.row { display:flex; flex-wrap:wrap; gap:8px; margin:12px 0; }
+.grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(280px, 1fr)); gap:12px; }
+.card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:14px; display:flex; gap:12px; }
+.card img { width:72px; height:108px; object-fit:cover; border-radius:6px; flex:none; background:var(--line); }
+.card h3 { margin:0; font-size:16px; }
+.muted { color:var(--muted); font-size:14px; }
+.why { color:var(--accent); font-size:13px; margin:4px 0; }
+.score { font-weight:700; }
+.duel { display:grid; grid-template-columns:1fr 1fr; gap:12px; margin:16px 0; }
+.duel button { padding:24px 12px; border-radius:12px; font-size:18px; }
+.panel { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:16px; margin:12px 0; }
+input, select, textarea { font:inherit; padding:6px 10px; border:1px solid var(--line); border-radius:8px; background:var(--card); color:var(--fg); max-width:100%; }
+ol.rank { padding-left:28px; } ol.rank li { padding:4px 0; }
+.banner { background:#fef3c7; color:#78350f; padding:8px 12px; border-radius:8px; margin-bottom:12px; font-size:14px; }
