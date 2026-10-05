@@ -20,13 +20,16 @@ export function mergeStates(a, b) {
     const o = older.movies[k];
     movies[k] = o ? { ...o, ...m, rating: m.rating ?? o.rating, meta: m.meta ?? o.meta } : m;
   }
+  // A deletion sticks unless the more recently changed device still has the film.
+  const deleted = { ...older.deleted, ...newer.deleted };
+  for (const k of Object.keys(movies)) if (deleted[k] && !(k in newer.movies)) delete movies[k];
   const order = newer.order.filter(k => movies[k]);
   const placed = new Set(order);
   for (const k of older.order) if (!placed.has(k) && movies[k]) order.push(k);
   const watchlist = [...newer.watchlist];
-  for (const m of older.watchlist) if (!watchlist.some(w => w.key === m.key)) watchlist.push(m);
+  for (const m of older.watchlist) if (!watchlist.some(w => w.key === m.key) && !deleted[`wl:${m.key}`]) watchlist.push(m);
   return {
-    ...newer, movies, order, watchlist,
+    ...newer, movies, order, watchlist, deleted,
     hidden: [...new Set([...newer.hidden, ...older.hidden])],
     favorites: newer.favorites?.length ? newer.favorites : (older.favorites || []),
     updatedAt: Math.max(a.updatedAt || 0, b.updatedAt || 0),

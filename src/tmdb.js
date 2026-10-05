@@ -75,7 +75,12 @@ export function createClient({ key, proxy = false, fetchImpl = globalThis.fetch 
       return hit;
     },
     // Free-text search for the Log screen: several candidates, already normalized.
-    searchMany: async query => (await get('/search/movie', { query })).results.slice(0, 8).map(normalize),
+    // "Heat 1995" searches for Heat released in 1995. Returns 20 per page.
+    async searchMany(query, page = 1) {
+      const m = /^(.*\S)\s+((?:19|20)\d{2})$/.exec(query.trim());
+      const r = await get('/search/movie', { query: m ? m[1] : query.trim(), page, ...(m ? { year: m[2] } : {}) });
+      return { results: r.results.map(normalize), totalPages: r.total_pages || 1 };
+    },
     details: id => get(`/movie/${id}`, { append_to_response: 'credits,watch/providers,external_ids' }).then(normalize),
     recommendations: id => get(`/movie/${id}/recommendations`).then(r => r.results.map(normalize)),
     // genreMode 'or' = any of the genres, 'and' = all of them.

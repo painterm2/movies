@@ -40,3 +40,12 @@ test('omdb proxy: owner only, validates the id, injects the key', async () => {
   assert.equal((await call({ i: 'tt0113277' }, owner)).code, 200);
   assert.ok(seen.includes('apikey=okey'));
 });
+
+test('searchMany parses a trailing year and pages results', async () => {
+  const { createClient } = await import('../src/tmdb.js');
+  let seen; const api = createClient({ key: 'k', fetchImpl: async u => { seen = new URL(u); return { ok: true, json: async () => ({ results: [{ id: 1, title: 'Heat', release_date: '1995-12-15' }], total_pages: 3 }) }; } });
+  const r = await api.searchMany('Heat 1995', 2);
+  assert.equal(seen.searchParams.get('query'), 'Heat'); assert.equal(seen.searchParams.get('year'), '1995'); assert.equal(seen.searchParams.get('page'), '2');
+  assert.equal(r.totalPages, 3); assert.equal(r.results[0].title, 'Heat');
+  await api.searchMany('1917'); assert.equal(seen.searchParams.get('query'), '1917'); // a bare year-like title is not split
+});

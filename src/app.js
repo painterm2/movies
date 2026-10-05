@@ -361,11 +361,26 @@ function statusLabel(meta) {
   return onWatchlist(meta) ? '<span class="tag">On watchlist</span>' : '';
 }
 
+const sameFilm = meta => m => m.key === meta.key || (meta.tmdbId && m.tmdbId === meta.tmdbId);
+function unlist(meta) { // remove from watchlist, remembering the removal so other devices don't restore it
+  const had = state.watchlist.filter(sameFilm(meta));
+  state.watchlist = state.watchlist.filter(m => !sameFilm(meta)(m));
+  for (const m of had) state.deleted[`wl:${m.key}`] = Date.now();
+}
 function toggleWatchlist(meta) {
-  const i = state.watchlist.findIndex(m => m.key === meta.key || (meta.tmdbId && m.tmdbId === meta.tmdbId));
-  if (i >= 0) state.watchlist.splice(i, 1);
-  else state.watchlist.push({ ...meta, providers: null, overview: meta.overview || '' });
+  if (state.watchlist.some(sameFilm(meta))) unlist(meta);
+  else { delete state.deleted[`wl:${meta.key}`]; state.watchlist.push({ ...meta, providers: null, overview: meta.overview || '' }); }
   persist();
+}
+
+// Remove a film from my list entirely (watched + ranking). Syncs as a deletion.
+function removeFilm(key) {
+  delete state.movies[key];
+  R.removeFromOrder(state.order, key);
+  if (state.rerank) { state.rerank.queue = state.rerank.queue.filter(k => k !== key); R.removeFromOrder(state.rerank.order, key); }
+  state.favorites = (state.favorites || []).filter(k => k !== key);
+  state.deleted[key] = Date.now();
+  ui.picks = null; persist();
 }
 
 // Add a film I just watched, then go straight to ranking it.
@@ -375,7 +390,7 @@ function logFilm(meta, date = today()) {
   const clean = { ...meta, key };
   state.movies[key] = existing ? { ...existing, meta: { ...existing.meta, ...clean }, watchedDate: date }
     : { key, title: meta.title, year: meta.year, rating: null, watchedDate: date, sources: ['logged'], meta: clean };
-  state.watchlist = state.watchlist.filter(m => m.key !== meta.key && !(meta.tmdbId && m.tmdbId === meta.tmdbId));
+  unlist(meta); delete state.deleted[key];
   persist();
   const api = tmdb(); // fill runtime / director in the background
   if (api && meta.tmdbId) api.details(meta.tmdbId).then(d => { state.movies[key].meta = { ...state.movies[key].meta, ...d, key }; persist(); }).catch(() => {});
@@ -417,6 +432,7 @@ function renderModal() {
       <div class="actions">
         ${k ? '' : '<button class="primary" data-act="detail-watched">I\'ve watched this</button>'}
         <button class="secondary" data-act="detail-list">${onWatchlist(m) ? '✓ On watchlist (remove)' : '+ Add to watchlist'}</button>
+        ${k ? '<button class="ghost danger" data-act="detail-remove">Remove from my list</button>' : ''}
       </div></div></div></div></div>`;
 }
 document.addEventListener('keydown', e => { if (e.key === 'Escape' && ui.detail) { ui.detail = null; renderModal(); } });
@@ -430,6 +446,12 @@ async function openDetail(meta) {
 }
 
 // ---- Find: search and browse all films ----------------------------------------------
+function tmdbIssue() {
+  if (tmdb()) return '';
+  if (ui.server && !ui.owner) return 'Sign in (Settings) to search and browse every film.';
+  if (ui.server) return "TMDB isn't connected: TMDB_API_KEY isn't set on the server (Vercel → Settings → Environment Variables), so only a tiny demo catalog exists. Add it and redeploy.";
+  return 'Demo catalog only (about 40 films). Add your TMDB key in Settings to search every film.';
+}
 const BROWSE = [['popular', 'Popular'], ['top', 'Top rated'], ['new', 'New']];
 const findList = () => (ui.search.mode === 'log' && ui.search.q.trim().length >= 2 ? ui.search.results : ui.browse.items);
 
@@ -450,14 +472,16 @@ function findListHtml() {
   const rows = items.map((m, i) => rowHtml(m, i, 'results')).join('');
   const manual = searching ? `<div class="result"><div class="info"><div class="t">Can't find it?</div><div class="muted">Add "${esc(ui.search.q.trim())}" without a lookup</div></div>
       <button class="chip-btn" data-act="log-manual">Add</button></div>` : '';
+  const moreSearch = searching && ui.search.page < ui.search.totalPages ? `<div class="row" style="justify-content:center"><button class="secondary" data-act="search-more">${ui.search.loading ? 'Loading…' : 'Load more results'}</button></div>` : '';
   const more = !searching && ui.browse.items.length ? `<div class="row" style="justify-content:center"><button class="secondary" data-act="browse-more" ${ui.browse.loading || ui.browse.done ? 'disabled' : ''}>${ui.browse.loading ? 'Loading…' : 'Load more'}</button></div>` : '';
   const empty = !items.length && (searching ? ui.search.note : (ui.browse.loading ? 'Loading…' : '')) ;
-  return `${empty ? `<p class="muted">${esc(empty)}</p>` : ''}${rows}${manual}${more}`;
+  return `${empty ? `<p class="muted">${esc(empty)}</p>` : ''}${rows}${moreSearch}${manual}${more}`;
 }
 
 function renderFind() {
   const q = ui.search.mode === 'log' ? ui.search.q : '';
   return `<section class="hero"><h2>Find films</h2><p>Search every film, or browse. See the synopsis, Rotten Tomatoes score and where it's streaming, then add it as watched or to your watchlist.</p></section>
+ ${tmdbIssue() ? `<div class="banner">${esc(tmdbIssue())}</div>` : ''}
     ${ui.status ? `<p class="banner">${esc(ui.status)}</p>` : ''}
     <input id="log-q" type="search" class="wide" placeholder="Search for a film…" autocomplete="off" value="${esc(q)}">
     <div class="filters" style="margin-top:12px">
@@ -476,7 +500,7 @@ async function loadBrowse(reset = false) {
   const y = new Date().getFullYear();
   try {
     const api = tmdb();
-    if (!api) { b.items = DEMO_CATALOG.filter(m => !b.genre || m.genres.includes(b.genre)); b.done = true; }
+    if (!api) { b.items = ui.server ? [] : DEMO_CATALOG.filter(m => !b.genre || m.genres.includes(b.genre)); b.done = true; }
     else {
       const shape = { popular: { sortBy: 'popularity.desc', minVotes: 200 }, top: { sortBy: 'vote_average.desc', minVotes: 3000 }, new: { sortBy: 'popularity.desc', minVotes: 50, dateGte: `${y - 1}-01-01` } }[b.kind];
       const rs = await api.discover({ ...shape, genreIds: b.genre ? [GENRE_NAME_TO_ID[b.genre]] : [], genreMode: 'and', page: ++b.page });
@@ -488,6 +512,17 @@ async function loadBrowse(reset = false) {
 }
 function updateFindList() { const el = document.getElementById('log-results'); if (el) el.innerHTML = findListHtml(); }
 
+async function loadMoreSearch() {
+  const sr = ui.search, api = tmdb();
+  if (!api || sr.loading || sr.page >= sr.totalPages) return;
+  sr.loading = true; updateFindList();
+  try {
+    const { results } = await api.searchMany(sr.q, sr.page + 1); sr.page++;
+    sr.results.push(...results.filter(r => !sr.results.some(x => x.tmdbId === r.tmdbId)));
+  } catch (e) { sr.note = e.message; }
+  sr.loading = false; updateFindList();
+}
+
 let searchTimer = null;
 function runSearch(q, mode) {
   ui.search = { ...ui.search, mode, q, results: [], note: '' };
@@ -498,10 +533,11 @@ function runSearch(q, mode) {
     const mine = ui.search.q;
     try {
       const api = tmdb();
-      const results = api ? await api.searchMany(q) : DEMO_CATALOG.filter(m => norm(m.title).includes(norm(q))).slice(0, 8);
+      const { results, totalPages } = api ? await api.searchMany(q)
+        : { results: ui.server ? [] : DEMO_CATALOG.filter(m => norm(m.title).includes(norm(q))).slice(0, 8), totalPages: 1 };
       if (mine !== ui.search.q) return; // typed something newer meanwhile
-      ui.search.results = results;
-      ui.search.note = results.length ? '' : 'No matches.';
+      Object.assign(ui.search, { results, totalPages, page: 1 });
+      ui.search.note = results.length ? '' : (api ? 'No matches.' : tmdbIssue());
     } catch (e) { ui.search.note = e.message; }
     if (mode === 'fix') { if (target()) target().innerHTML = searchResultsHtml(); } else updateFindList();
   }, 300);
@@ -648,18 +684,29 @@ function renderRank() {
 }
 
 // ---- My Top list --------------------------------------------------------------
+const topMatches = q => { const n = norm(q); return n ? t => norm(t).includes(n) : () => true; };
+
+function topListHtml() {
+  const sc = scores(), match = topMatches(ui.topQ || '');
+  const rows = state.order.map((k, i) => ({ k, i, m: state.movies[k] })).filter(({ m }) => m && match(m.title));
+  const loose = unplaced().filter(m => match(m.title));
+  const row = ({ k, i, m }) => `<li class="item" data-act="detail" data-src="top" data-i="${i}"><span class="n">${i + 1}</span>${poster(m.meta, m.title, '56px')}
+      <div><div class="t">${esc(m.title)}</div><div class="muted">${esc(m.year ?? '')}${m.meta?.genres?.length ? ' · ' + esc(m.meta.genres.slice(0, 2).join(', ')) : ''}</div></div>
+      <span class="score">${sc[k].toFixed(1)}</span>
+      <button class="x" data-act="film-remove" data-key="${esc(k)}" aria-label="Remove ${esc(m.title)}" title="Remove from my list">✕</button></li>`;
+  return `${rows.length ? `<ol class="list">${rows.map(row).join('')}</ol>` : `<p class="muted">${ui.topQ ? `No films match "${esc(ui.topQ)}".` : 'Nothing ranked yet.'}</p>`}
+    ${loose.length ? `<h3 class="sub">Not ranked yet (${loose.length})</h3><ul class="list">${loose.map(m => `<li class="item loose"><span class="n"></span>${poster(m.meta, m.title, '56px')}
+      <div><div class="t">${esc(m.title)}</div><div class="muted">${esc(m.year ?? '')}</div></div>
+      <button class="chip-btn" data-act="rank-this" data-key="${esc(m.key)}">Rank</button>
+      <button class="x" data-act="film-remove" data-key="${esc(m.key)}" aria-label="Remove ${esc(m.title)}" title="Remove from my list">✕</button></li>`).join('')}</ul>` : ''}`;
+}
+
 function renderLibrary() {
-  const sc = scores();
-  const flat = state.order;
-  if (!flat.length) return `<section class="hero"><h2>My Top</h2></section><div class="empty"><div class="big">🏆</div><p>Nothing ranked yet. Head to <a href="#" data-tab-link="rank">Rank</a>.</p></div>`;
-  return `<section class="hero"><h2>My Top ${flat.length}</h2><p>Your films, best to worst.</p></section>
+  if (!state.order.length && !unplaced().length) return `<section class="hero"><h2>My Top</h2></section><div class="empty"><div class="big">🏆</div><p>Nothing ranked yet. Head to <a href="#" data-tab-link="rank">Rank</a>.</p></div>`;
+  return `<section class="hero"><h2>My Top ${state.order.length}</h2><p>Your films, best to worst.</p></section>
     ${ui.status ? `<p class="banner">${esc(ui.status)}</p>` : ''}
-    <ol class="list">${flat.map((k, i) => {
-      const m = state.movies[k]; if (!m) return '';
-      return `<li class="item"><span class="n">${i + 1}</span>${poster(m.meta, m.title, '56px')}
-        <div><div class="t">${esc(m.title)}</div><div class="muted">${esc(m.year ?? '')}${m.meta?.genres?.length ? ' · ' + esc(m.meta.genres.slice(0, 2).join(', ')) : ''}</div></div>
-        <span class="score">${sc[k].toFixed(1)}</span></li>`;
-    }).join('')}</ol>`;
+    <input id="top-q" type="search" class="wide" placeholder="Search my films…" autocomplete="off" value="${esc(ui.topQ || '')}">
+    <div id="top-list">${topListHtml()}</div>`;
 }
 
 // ---- Import -------------------------------------------------------------------
@@ -784,10 +831,9 @@ async function onClick(e) {
     case 'stream-only': ui.streamOnly = btn.checked; return loadPicks();
     case 'hide': state.hidden.push(ui.picks[i].meta.key); dropPick(i); persist(); return render();
     case 'watchlist': toggleWatchlist(view(ui.picks[i].meta)); dropPick(i); return render();
-    case 'unlist': state.watchlist = state.watchlist.filter(m => m.key !== ui.picks[i].meta.key); dropPick(i); persist(); return render();
+    case 'unlist': unlist(ui.picks[i].meta); dropPick(i); persist(); return render();
     case 'seen': {
       const meta = ui.picks[i].meta;
-      state.watchlist = state.watchlist.filter(m => m.key !== meta.key);
       logFilm(view(meta)); // "what did you think?" starts the ranking
       return;
     }
@@ -842,15 +888,27 @@ async function onClick(e) {
       mergeIntoLibrary(state, [{ title, year, rating: null, watchedDate: null, source: 'manual' }]);
       persist(); if (!isDemo()) enrichLibrary(); ui.status = `Added ${title}.`; return render();
     }
+    case 'film-remove': {
+      const m = state.movies[btn.dataset.key];
+      if (m && confirm(`Remove "${m.title}" from your list? You can add it again from Find.`)) { removeFilm(btn.dataset.key); ui.status = `Removed ${m.title}.`; }
+      return render();
+    }
+    case 'rank-this': return startRanking(btn.dataset.key);
+    case 'detail-remove': {
+      const k = findKey(ui.detail.meta), m = state.movies[k];
+      if (m && confirm(`Remove "${m.title}" from your list?`)) { removeFilm(k); ui.detail = null; renderModal(); ui.status = `Removed ${m.title}.`; render(); }
+      return;
+    }
     case 'detail': return openDetail(srcMeta(btn.dataset.src, +btn.dataset.i));
     case 'close-detail': ui.detail = null; return renderModal();
     case 'detail-watched': return logFilm(view(ui.detail.meta));
     case 'detail-list': toggleWatchlist(view(ui.detail.meta)); renderModal(); return safeRender();
     case 'row-watched': return logFilm(view(srcMeta(btn.dataset.src, i)));
     case 'row-list': toggleWatchlist(view(srcMeta(btn.dataset.src, i))); return ui.tab === 'find' ? updateFindList() : render();
-    case 'wl-remove': state.watchlist.splice(i, 1); persist(); return render();
+    case 'wl-remove': unlist(state.watchlist[i]); persist(); return render();
     case 'browse-kind': ui.browse.kind = btn.dataset.v; render(); return loadBrowse(true);
     case 'browse-more': return loadBrowse();
+    case 'search-more': return loadMoreSearch();
     case 'spot-pick': case 'spot-again': return pickFromWatchlist();
     case 'spot-close': ui.spot = null; return render();
     case 'spot-watched': return logFilm(view(ui.spot));
@@ -878,6 +936,7 @@ async function onClick(e) {
 $app.addEventListener('click', onClick);
 $modal.addEventListener('click', onClick);
 $app.addEventListener('input', e => {
+  if (e.target.id === 'top-q') { ui.topQ = e.target.value; document.getElementById('top-list').innerHTML = topListHtml(); }
   if (e.target.id === 'log-q') runSearch(e.target.value, 'log');
   if (e.target.id === 'fix-q') runSearch(e.target.value, 'fix');
 });

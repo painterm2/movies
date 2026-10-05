@@ -98,3 +98,16 @@ test('tmdb proxy: owner only, known paths only, key injected server-side', async
   assert.equal(r.code, 200);
   assert.ok(seen.includes('api_key=serverkey') && seen.includes('query=heat'));
 });
+
+test('a deletion on one device is not undone by merging with an older copy', () => {
+  const stale = mk(100, { a: film('a'), b: film('b') }, ['a', 'b']);
+  const fresh = { ...mk(200, { a: film('a') }, ['a']), deleted: { b: 150 } };
+  const m = mergeStates(fresh, stale);
+  assert.deepEqual(Object.keys(m.movies), ['a']);
+  assert.deepEqual(m.order, ['a']);
+  // ...and the other direction (stale side is "a", fresh one deleted b)
+  assert.deepEqual(Object.keys(mergeStates(stale, fresh).movies), ['a']);
+  // watchlist removals stick too
+  const w = mergeStates({ ...mk(200, {}), watchlist: [], deleted: { 'wl:x': 1 } }, { ...mk(100, {}), watchlist: [{ key: 'x' }] });
+  assert.deepEqual(w.watchlist, []);
+});

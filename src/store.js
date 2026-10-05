@@ -8,6 +8,7 @@ export const emptyState = () => ({
   movies: {},            // key -> { key, title, year, rating, watchedDate, sources, meta }
   order: emptyOrder(),   // ranked film keys, best first
   favorites: [],         // ordered keys from an imported favourites list
+  deleted: {},           // key -> time removed (so a deletion isn't undone by another device's sync)
   hidden: [],            // keys the user dismissed
   watchlist: [],         // saved candidate metas
   updatedAt: 0,          // ms timestamp of the last change; decides sync winners
@@ -18,6 +19,7 @@ export const emptyState = () => ({
 export function migrate(state) {
   if (!state.order) state.order = state.rank ? [...state.rank.loved, ...state.rank.liked, ...state.rank.meh] : [];
   delete state.rank;
+  state.deleted ||= {};
   return state;
 }
 
