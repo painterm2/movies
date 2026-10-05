@@ -22,4 +22,12 @@ No build step or dependencies. All data lives in your browser's localStorage; yo
 
 ## Deploy to Vercel
 Import the repo in Vercel (framework: Other, no build command). `vercel.json` serves the repo root as a static site.
-Note: data is per-browser. Sync across devices would need a backend (e.g. Vercel KV/Postgres) and sign-in; that's the natural next step.
+
+### Sync across devices (phone, laptop…)
+Your library lives in a Redis database behind `/api/state`, protected by one passphrase.
+1. Vercel project → **Storage** → create/connect **Upstash Redis** (Marketplace). This adds the `KV_REST_API_*` / `UPSTASH_REDIS_REST_*` env vars.
+2. **Settings → Environment Variables**, add:
+   - `SYNC_PASSWORD`: a passphrase you choose (the API refuses to run without it)
+   - `TMDB_API_KEY`: optional; keeps your TMDB key on the server so devices don't need it
+3. Redeploy. On each device: **Settings** → enter the passphrase → Save.
+The app pulls on load and when you return to the tab, and pushes shortly after each change. If two devices edited, they're merged (nothing added is lost; the more recent device wins ordering). Device-local: passphrase and TMDB key.

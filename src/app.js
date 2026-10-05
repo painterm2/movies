@@ -5,14 +5,45 @@ import { buildProfile, rank as rankCandidates } from './recommend.js';
 import { MOODS, GENRE_NAME_TO_ID } from './moods.js';
 import { createClient, imageUrl, streamingOn } from './tmdb.js';
 import { DEMO_CATALOG, demoLibrary } from './demo.js';
+import { unzipText, isLetterboxdTasteFile } from './unzip.js';
+import { createSyncClient, mergeStates } from './sync.js';
 
 const state = load();
-const ui = { tab: 'recommend', mood: null, recs: null, loading: '', status: '', session: null, streamOnly: false };
+const ui = { proxy: false, sync: '', tab: 'recommend', mood: null, recs: null, loading: '', status: '', session: null, streamOnly: false };
 const $app = document.getElementById('app');
-const persist = () => save(state);
+// ---- sync ---------------------------------------------------------------------
+let pushTimer = null, syncing = false;
+const syncOn = () => Boolean(state.settings.syncPass);
+function persist(touch = true) {
+  if (touch) state.updatedAt = Date.now();
+  save(state);
+  if (touch && syncOn()) { clearTimeout(pushTimer); pushTimer = setTimeout(syncNow, 1500); }
+}
+async function syncNow() {
+  if (!syncOn() || syncing) return;
+  syncing = true;
+  try {
+    const client = createSyncClient(state.settings.syncPass);
+    const { state: remote, tmdbProxy } = await client.pull();
+    ui.proxy = tmdbProxy;
+    let next = state;
+    if (remote) {
+      const merged = mergeStates(state, { ...remote, settings: state.settings });
+      Object.assign(state, merged, { settings: state.settings });
+      next = state;
+    }
+    save(state);
+    await client.push(next);
+    ui.sync = `Synced ${new Date().toLocaleTimeString()}`;
+  } catch (e) { ui.sync = `Sync problem: ${e.message}`; }
+  syncing = false;
+  render();
+}
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') syncNow(); });
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-const tmdb = () => (state.settings.tmdbKey ? createClient({ key: state.settings.tmdbKey }) : null);
-const isDemo = () => !state.settings.tmdbKey;
+const tmdb = () => (ui.proxy && syncOn() ? createClient({ proxyPass: state.settings.syncPass })
+  : state.settings.tmdbKey ? createClient({ key: state.settings.tmdbKey }) : null);
+const isDemo = () => !tmdb();
 
 const TABS = [['recommend', 'Recommend'], ['rank', 'Rank'], ['library', 'My Top'], ['import', 'Import'], ['settings', 'Settings']];
 function renderNav() {
@@ -189,8 +220,8 @@ function renderImport() {
   const n = Object.keys(state.movies).length;
   return `<h2>Import what you've watched</h2>
     <div class="panel"><b>Letterboxd</b>
-      <p class="muted">Letterboxd has no public API, so use your own data export: Settings → Data → Export Your Data. Upload <code>ratings.csv</code>, <code>watched.csv</code> and/or <code>diary.csv</code> from the zip. Optionally add <code>lists/top-10.csv</code> (or any ranked list) to pin your favourites at the top.</p>
-      <input type="file" id="file-lb" accept=".csv" multiple></div>
+      <p class="muted">Letterboxd has no public API, so use your own data export: Settings → Data → Export Your Data. <b>Just upload the .zip as is</b> (reviews, comments and likes are ignored), or upload <code>ratings.csv</code>, <code>watched.csv</code> and/or <code>diary.csv</code> from the zip. Optionally add <code>lists/top-10.csv</code> (or any ranked list) to pin your favourites at the top.</p>
+      <input type="file" id="file-lb" accept=".csv,.zip" multiple></div>
     <div class="panel"><b>Netflix (or any streaming CSV)</b>
       <p class="muted">Netflix: Account → Profile → Viewing activity → Download all. Series episodes are skipped automatically. Any CSV with a <code>Title</code> or <code>Name</code> column works (optional <code>Year</code>, <code>Rating</code>). Most other services don't offer a history export; add titles by hand below.</p>
       <input type="file" id="file-other" accept=".csv" multiple></div>
@@ -207,13 +238,21 @@ function renderImport() {
 
 async function handleFiles(input) {
   const msgs = [];
+  // Expand any .zip (Letterboxd export) into its useful CSVs first.
+  const files = [];
   for (const f of input.files) {
-    const text = await f.text();
+    if (/\.zip$/i.test(f.name)) {
+      try { files.push(...await unzipText(await f.arrayBuffer(), isLetterboxdTasteFile)); }
+      catch (e) { msgs.push(`${f.name}: ${e.message}`); }
+    } else files.push({ name: f.name, text: await f.text() });
+  }
+  for (const f of files) {
+    const text = f.text;
     if (isListExport(text)) { // ordered favourites list, e.g. Letterboxd Top 10
       const listed = parseList(text);
       mergeIntoLibrary(state, listed.map(x => ({ ...x, rating: null, watchedDate: null, source: 'letterboxd-list' })));
       const keys = listed.map(x => movieKey(x.title, x.year));
-      state.favorites = keys;
+      if (!state.favorites.length) state.favorites = keys; // first list wins (usually your Top 10)
       msgs.push(`${f.name}: favourites list of ${keys.length}`);
       continue;
     }
@@ -222,7 +261,7 @@ async function handleFiles(input) {
     msgs.push(`${f.name}: ${items.length} rows (${source}), ${r.added} new`);
   }
   R.seedFromRatings(state.rank, state.movies);
-  R.applyFavoritesOrder(state.rank, state.favorites || []);
+  R.applyFavoritesOrder(state.rank, state.favorites || [], new Set(Object.keys(state.movies)));
   persist();
   ui.status = msgs.join(' · ') + (isDemo() ? '' : ' — looking up details…');
   render();
@@ -233,7 +272,12 @@ async function handleFiles(input) {
 function renderSettings() {
   const s = state.settings;
   return `<h2>Settings</h2>
+    <div class="panel"><b>Sync across devices</b>
+      <p class="muted">Enter the passphrase you set as <code>SYNC_PASSWORD</code> in Vercel. Use the same one on every device and your library, rankings and watchlist stay in sync. It's saved only on this device.</p>
+      <input id="s-pass" type="password" size="30" value="${esc(s.syncPass)}" placeholder="Sync passphrase">
+      ${ui.sync ? `<p class="muted">${esc(ui.sync)}</p>` : ''}</div>
     <div class="panel"><b>TMDB API key</b>
+      ${ui.proxy ? '<p class="muted">✓ The server already has your TMDB key, so you can leave this blank.</p>' : ''}
       <p class="muted">Free at themoviedb.org → Settings → API. Used for posters, genres, recommendations and "where to stream". Stored only in this browser.</p>
       <input id="s-key" type="password" size="40" value="${esc(s.tmdbKey)}" placeholder="API key or read access token"></div>
     <div class="panel"><b>Streaming</b>
@@ -291,10 +335,12 @@ $app.addEventListener('click', async e => {
     case 'enrich': return enrichLibrary();
     case 'wipe': if (confirm('Erase your library, rankings and settings from this browser?')) { localStorage.clear(); location.reload(); } return;
     case 'save-settings':
+      state.settings.syncPass = document.getElementById('s-pass').value.trim();
       state.settings.tmdbKey = document.getElementById('s-key').value.trim();
       state.settings.region = document.getElementById('s-region').value.trim().toUpperCase() || 'US';
       state.settings.services = document.getElementById('s-services').value.split(',').map(x => x.trim()).filter(Boolean);
-      persist(); ui.status = 'Saved.'; ui.tab = 'recommend'; render(); if (!isDemo()) enrichLibrary(); return;
+      persist(false); ui.status = 'Saved.'; ui.tab = 'recommend';
+      await syncNow(); render(); if (!isDemo()) enrichLibrary(); return;
   }
 });
 $app.addEventListener('change', e => {
@@ -318,3 +364,4 @@ function render() {
   $app.innerHTML = { recommend: renderRecommend, rank: renderRank, library: renderLibrary, import: renderImport, settings: renderSettings }[ui.tab]();
 }
 render();
+syncNow(); // pull the latest on load

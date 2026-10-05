@@ -10,7 +10,8 @@ export const emptyState = () => ({
   favorites: [],         // ordered keys from an imported favourites list
   hidden: [],            // keys the user dismissed
   watchlist: [],         // saved candidate metas
-  settings: { tmdbKey: '', region: 'US', services: [] },
+  updatedAt: 0,          // ms timestamp of the last change; decides sync winners
+  settings: { tmdbKey: '', region: 'US', services: [], syncPass: '' }, // device-local, never synced
 });
 
 export function load(storage = globalThis.localStorage) {

@@ -96,8 +96,11 @@ export function swapPair(rank, pair) {
 }
 
 // Pin an ordered favourites list (e.g. a Letterboxd "Top 10") to the top of the buckets
-// the films already sit in, preserving the list's order. Keys not ranked are ignored.
-export function applyFavoritesOrder(rank, orderedKeys) {
+// the films already sit in, preserving the list's order. Favourites that haven't been
+// placed yet (no star rating) go into "loved" at their listed spot. Keys not in `known` are ignored.
+export function applyFavoritesOrder(rank, orderedKeys, known = null) {
+  const placed = new Set(flatRanking(rank));
+  for (const k of orderedKeys) if (!placed.has(k) && (!known || known.has(k))) rank.loved.push(k);
   for (const b of BUCKET_ORDER) {
     const pinned = orderedKeys.filter(k => rank[b].includes(k));
     rank[b] = [...pinned, ...rank[b].filter(k => !pinned.includes(k))];

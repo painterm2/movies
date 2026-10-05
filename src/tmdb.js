@@ -25,13 +25,23 @@ export function normalize(raw) {
   };
 }
 
-export function createClient({ key, fetchImpl = globalThis.fetch }) {
+// Direct mode: { key } calls TMDB from the browser. Proxy mode: { proxyPass } calls our
+// /api/tmdb, which holds the key server-side (set TMDB_API_KEY in Vercel).
+export function createClient({ key, proxyPass, fetchImpl = globalThis.fetch }) {
   const bearer = key && key.length > 40;
   async function get(path, params = {}) {
-    const url = new URL(BASE + path);
+    let url, init = {};
+    if (proxyPass) {
+      url = new URL('/api/tmdb', globalThis.location?.origin || 'http://localhost');
+      url.searchParams.set('path', path);
+      init = { headers: { Authorization: `Bearer ${proxyPass}` } };
+    } else {
+      url = new URL(BASE + path);
+      if (!bearer) url.searchParams.set('api_key', key);
+      else init = { headers: { Authorization: `Bearer ${key}` } };
+    }
     for (const [k, v] of Object.entries(params)) url.searchParams.set(k, v);
-    if (!bearer) url.searchParams.set('api_key', key);
-    const res = await fetchImpl(url, bearer ? { headers: { Authorization: `Bearer ${key}` } } : {});
+    const res = await fetchImpl(url, init);
     if (res.status === 401) throw new Error('TMDB rejected the API key.');
     if (!res.ok) throw new Error(`TMDB error ${res.status}`);
     return res.json();

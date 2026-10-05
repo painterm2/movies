@@ -52,6 +52,12 @@ test('refine swap', () => {
 
 test('favorites order pins listed films to the top of their bucket', () => {
   const rank = { loved: ['a', 'b', 'c', 'd'], liked: ['e'], meh: [] };
-  R.applyFavoritesOrder(rank, ['c', 'missing', 'a', 'e']);
+  R.applyFavoritesOrder(rank, ['c', 'missing', 'a', 'e'], new Set(['a', 'b', 'c', 'd', 'e']));
   assert.deepEqual(rank, { loved: ['c', 'a', 'b', 'd'], liked: ['e'], meh: [] });
+});
+
+test('unplaced favorites join loved at their listed position', () => {
+  const rank = { loved: ['a', 'b'], liked: [], meh: [] };
+  R.applyFavoritesOrder(rank, ['a', 'new', 'ghost'], new Set(['a', 'b', 'new']));
+  assert.deepEqual(rank.loved, ['a', 'new', 'b']);
 });
