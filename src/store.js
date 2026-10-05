@@ -11,7 +11,7 @@ export const emptyState = () => ({
   hidden: [],            // keys the user dismissed
   watchlist: [],         // saved candidate metas
   updatedAt: 0,          // ms timestamp of the last change; decides sync winners
-  settings: { tmdbKey: '', region: 'US', services: [], syncPass: '' }, // device-local, never synced (syncPass is legacy: cleared after auto sign-in)
+  settings: { tmdbKey: '', region: 'US', services: [], syncPass: '', omdbKey: '' }, // device-local, never synced (syncPass is legacy: cleared after auto sign-in)
 });
 
 // Older versions kept three buckets (state.rank); flatten them into one ordered list.

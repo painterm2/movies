@@ -16,7 +16,7 @@ export default async function handler(req, res) {
     if (req.method === 'GET') {
       if (!owner && process.env.REQUIRE_LOGIN_TO_VIEW) return res.status(401).json({ error: 'Sign in to view.', owner: false });
       const raw = await redis('GET', KEY);
-      return res.status(200).json({ state: raw ? JSON.parse(raw) : null, owner, tmdbProxy: owner && Boolean(process.env.TMDB_API_KEY) });
+      return res.status(200).json({ state: raw ? JSON.parse(raw) : null, owner, tmdbProxy: owner && Boolean(process.env.TMDB_API_KEY), omdbProxy: owner && Boolean(process.env.OMDB_API_KEY) });
     }
     if (!owner) return res.status(401).json({ error: 'Sign in to make changes.' });
     if (req.method === 'PUT') {

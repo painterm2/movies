@@ -4,7 +4,8 @@ import * as R from './ranking.js';
 import { buildProfile, rank as rankCandidates } from './recommend.js';
 import { MOODS, GENRE_NAME_TO_ID, GENRE_IDS, moodScore } from './moods.js';
 import { BRAND } from './brand.js';
-import { createClient, imageUrl, streamingOn } from './tmdb.js';
+import { createClient, imageUrl, streamingOn, streamingInfo } from './tmdb.js';
+import { createOmdb } from './omdb.js';
 import { DEMO_CATALOG, demoLibrary } from './demo.js';
 import { unzipText, isLetterboxdTasteFile } from './unzip.js';
 import { createSyncClient, mergeStates, syncPayload } from './sync.js';
@@ -19,7 +20,7 @@ function setTheme(t) {
 setTheme(getTheme());
 
 const state = load();
-const ui = { proxy: false, server: false, owner: false, hasRemote: false, authError: '', sync: '', tab: 'recommend', mood: null, loading: '', status: '', session: null, streamOnly: false,
+const ui = { omdbProxy: false, dcache: new Map(), detail: null, spot: null, spotStreamOnly: false, browse: { kind: 'popular', genre: '', page: 0, items: [], loading: false, done: false }, proxy: false, server: false, owner: false, hasRemote: false, authError: '', sync: '', tab: 'recommend', mood: null, loading: '', status: '', session: null, streamOnly: false,
   filters: { genre: '', release: 'any', scope: 'new' }, picks: null, ranked: [], loadToken: 0, recCache: new Map(),
   search: { mode: 'log', key: null, q: '', results: [], note: '' }, enrichError: '', triedPoster: new Set(), enriching: false };
 document.title = BRAND.name;
@@ -40,8 +41,8 @@ async function syncNow() {
   syncing = true;
   try {
     const client = createSyncClient();
-    const { state: remote, owner, tmdbProxy } = await client.pull();
-    ui.server = true; ui.owner = owner; ui.proxy = tmdbProxy; ui.hasRemote = Boolean(remote);
+    const { state: remote, owner, tmdbProxy, omdbProxy } = await client.pull();
+    ui.server = true; ui.owner = owner; ui.proxy = tmdbProxy; ui.omdbProxy = omdbProxy; ui.hasRemote = Boolean(remote);
     if (remote && !owner) { // viewer: show exactly what the server has
       Object.assign(state, migrate(remote), { settings: state.settings });
       save(state);
@@ -62,22 +63,24 @@ async function signIn(passphrase) {
   try { await createSyncClient().login(passphrase); ui.authError = ''; await syncNow(); return true; }
   catch (e) { ui.authError = e.message; render(); return false; }
 }
-async function signOut() { try { await createSyncClient().logout(); } catch { /* ignore */ } ui.owner = false; ui.proxy = false; await syncNow(); }
+async function signOut() { try { await createSyncClient().logout(); } catch { /* ignore */ } ui.owner = false; ui.proxy = false; ui.omdbProxy = false; await syncNow(); }
 
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const tmdb = () => (ui.proxy ? createClient({ proxy: true })
   : state.settings.tmdbKey ? createClient({ key: state.settings.tmdbKey }) : null);
+const omdb = () => (ui.omdbProxy ? createOmdb({ proxy: true }) : state.settings.omdbKey ? createOmdb({ key: state.settings.omdbKey }) : null);
 const isDemo = () => !tmdb() && !ui.server;
 
 const ICONS = {
   recommend: '<path d="M12 3l2.6 5.6 6.1.7-4.5 4.2 1.2 6L12 16.6 6.6 19.5l1.2-6L3.3 9.3l6.1-.7z"/>',
   rank: '<path d="M8 3L4 7l4 4M4 7h16M16 21l4-4-4-4M20 17H4"/>',
   library: '<path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/>',
-  log: '<path d="M12 5v14M5 12h14"/>',
+  find: '<circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/>',
+  watchlist: '<path d="M6 3h12v18l-6-4-6 4z"/>',
   import: '<path d="M12 3v12M7 10l5 5 5-5M4 21h16"/>',
   settings: '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 00.3 1.8l.1.1a2 2 0 11-2.8 2.8l-.1-.1a1.7 1.7 0 00-1.8-.3 1.7 1.7 0 00-1 1.5V21a2 2 0 11-4 0v-.1a1.7 1.7 0 00-1.1-1.5 1.7 1.7 0 00-1.8.3l-.1.1a2 2 0 11-2.8-2.8l.1-.1a1.7 1.7 0 00.3-1.8 1.7 1.7 0 00-1.5-1H3a2 2 0 110-4h.1a1.7 1.7 0 001.5-1.1 1.7 1.7 0 00-.3-1.8l-.1-.1a2 2 0 112.8-2.8l.1.1a1.7 1.7 0 001.8.3H9a1.7 1.7 0 001-1.5V3a2 2 0 114 0v.1a1.7 1.7 0 001 1.5 1.7 1.7 0 001.8-.3l.1-.1a2 2 0 112.8 2.8l-.1.1a1.7 1.7 0 00-.3 1.8V9a1.7 1.7 0 001.5 1H21a2 2 0 110 4h-.1a1.7 1.7 0 00-1.5 1z"/>',
 };
-const TABS = [['recommend', 'Next Watch'], ['log', 'Log'], ['rank', 'Rank'], ['library', 'My Top'], ['import', 'Import'], ['settings', 'Settings']];
+const TABS = [['recommend', 'Next Watch'], ['find', 'Find'], ['watchlist', 'Watchlist'], ['rank', 'Rank'], ['library', 'My Top'], ['settings', 'Settings']];
 function renderNav() {
   document.getElementById('nav').innerHTML = TABS.map(([id, l]) =>
     `<button class="${ui.tab === id ? 'active' : ''}" data-tab="${id}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${ICONS[id]}</svg>${l}</button>`).join('');
@@ -129,7 +132,7 @@ async function enrichLibrary({ retryMissing = false } = {}) {
         else ui.triedPoster.add(m.key);
       }
       ui.loading = `Fetching posters… ${++done}`;
-      if (ui.tab === 'import') safeRender();
+      if (ui.tab === 'settings') safeRender();
     }
   };
   await Promise.all([worker(), worker(), worker(), worker()]); // 4 at a time
@@ -210,12 +213,10 @@ async function fetchCandidates() {
   return prelim.map(({ meta, sources }) => ({ meta, sources }));
 }
 
-// Make sure the shown picks have a synopsis (rewatch/watchlist metas may lack one).
+// Pull full details, scores and "where to watch" for the shown picks.
 async function fillDetails(token) {
-  const api = tmdb(); if (!api) return;
-  const need = (ui.picks || []).filter(c => c.meta.tmdbId && !c.meta.overview);
-  if (!need.length) return;
-  await Promise.all(need.map(async c => { try { c.meta = { ...c.meta, ...(await api.details(c.meta.tmdbId)) }; } catch { /* ignore */ } }));
+  if (!tmdb() && !omdb()) return;
+  await fillAll((ui.picks || []).map(c => c.meta));
   if (token === ui.loadToken) safeRender();
 }
 
@@ -260,23 +261,24 @@ function poster(meta, title, sizes = '(max-width:720px) 46vw, 200px') {
 }
 
 function pickHtml(c, i) {
-  const m = c.meta;
-  const on = streamingOn(m, state.settings.region, state.settings.services);
+  const m = view(c.meta);
   const scope = ui.filters.scope;
   return `<article class="pick${i === 0 ? ' first' : ''}">
-    <div class="pick-poster">${poster(m, m.title, '(max-width:720px) 32vw, 190px')}</div>
+    <div class="pick-poster" data-act="detail" data-src="picks" data-i="${i}">${poster(m, m.title, '(max-width:720px) 32vw, 190px')}</div>
     <div class="pick-body">
       <h3>${esc(m.title)}</h3>
       <div class="meta">${esc(m.year)}${m.runtime ? ` · ${m.runtime} min` : ''} · ${esc((m.genres || []).slice(0, 3).join(', '))}</div>
+      ${scoresHtml(m)}
       ${(c.reasons || []).slice(0, 2).map(r => `<div class="why">${esc(r)}</div>`).join('')}
       ${m.overview ? `<p class="synopsis">${esc(m.overview)}</p>` : ''}
-      ${on.length ? `<div class="stream">▶ Streaming on ${esc(on.slice(0, 3).join(', '))}</div>` : ''}
-      ${scope === 'rewatch' ? '' : `<div class="actions">
-        <button class="chip-btn" data-act="seen" data-i="${i}">I've seen it</button>
+      ${whereHtml(m)}
+      <div class="actions">
+        <button class="chip-btn" data-act="detail" data-src="picks" data-i="${i}">Details</button>
+        ${scope === 'rewatch' ? '' : `<button class="chip-btn" data-act="seen" data-i="${i}">I've seen it</button>
         ${scope === 'watchlist' ? `<button class="chip-btn" data-act="unlist" data-i="${i}">Remove</button>`
           : `<button class="chip-btn" data-act="watchlist" data-i="${i}">+ Watchlist</button>`}
-        <button class="chip-btn quiet" data-act="hide" data-i="${i}" aria-label="Not interested" title="Not interested">✕</button>
-      </div>`}
+        <button class="chip-btn quiet" data-act="hide" data-i="${i}" aria-label="Not interested" title="Not interested">✕</button>`}
+      </div>
     </div></article>`;
 }
 
@@ -305,68 +307,255 @@ function renderRecommend() {
     ${ui.status ? `<p class="banner">${esc(ui.status)}</p>` : ''}${body}`;
 }
 
-// ---- Log a film ---------------------------------------------------------------
+// ---- shared helpers for browsing films ---------------------------------------
 const today = () => new Date().toISOString().slice(0, 10);
+const findKey = meta => Object.keys(state.movies).find(k => k === movieKey(meta.title, meta.year) || (meta.tmdbId && state.movies[k].meta?.tmdbId === meta.tmdbId));
+const onWatchlist = meta => state.watchlist.some(m => m.key === meta.key || (meta.tmdbId && m.tmdbId === meta.tmdbId));
 
-function searchResultsHtml() {
-  const { results, q, note, mode } = ui.search;
-  const rows = results.map((m, i) => `<div class="result">
-      <div class="thumb">${poster(m, m.title, '56px')}</div>
-      <div class="info"><div class="t">${esc(m.title)} <span class="muted">${esc(m.year ?? '')}</span></div>
-        <div class="muted clamp">${esc(m.overview || (m.genres || []).join(', '))}</div></div>
-      <button class="chip-btn" data-act="${mode === 'fix' ? 'fix-pick' : 'log-pick'}" data-i="${i}">${mode === 'fix' ? 'Use this' : 'I watched this'}</button>
-    </div>`).join('');
-  const manual = q.trim() && mode === 'log' ? `<div class="result"><div class="info"><div class="t">Not listed?</div><div class="muted">Add "${esc(q.trim())}" without a lookup</div></div>
+// Merge anything we've fetched this session (providers, synopsis, scores) onto a meta.
+function view(meta) {
+  const c = ui.dcache.get(meta.tmdbId);
+  return c ? { ...meta, ...(c.details || {}), ...(c.scores || {}), key: meta.key } : meta;
+}
+
+// Full details + Rotten Tomatoes etc. for one film. Cached for the session.
+async function fullMeta(meta, { scores = true } = {}) {
+  if (!meta.tmdbId) return meta;
+  const c = ui.dcache.get(meta.tmdbId) || {};
+  const api = tmdb();
+  if (api && c.details === undefined) { try { c.details = await api.details(meta.tmdbId); } catch { c.details = null; } }
+  const imdbId = c.details?.imdbId || meta.imdbId;
+  const o = omdb();
+  if (scores && o && imdbId && c.scores === undefined) { try { c.scores = await o.get(imdbId); } catch { c.scores = null; } }
+  ui.dcache.set(meta.tmdbId, c);
+  return view(meta);
+}
+// Fill details for a batch (4 at a time), re-rendering as they land.
+async function fillAll(metas, opts) {
+  const todo = metas.filter(m => m.tmdbId && ui.dcache.get(m.tmdbId)?.details === undefined);
+  const worker = async () => { while (todo.length) { await fullMeta(todo.shift(), opts); safeRender(); } };
+  await Promise.all([worker(), worker(), worker(), worker()]);
+}
+
+function scoresHtml(m) {
+  const bits = [];
+  if (m.rt != null) bits.push(`<span class="score-chip rt" title="Rotten Tomatoes (critics)">${m.rt >= 60 ? '🍅' : '🤢'} ${m.rt}%</span>`);
+  if (m.imdb != null) bits.push(`<span class="score-chip" title="IMDb">IMDb ${m.imdb}</span>`);
+  if (m.metacritic != null) bits.push(`<span class="score-chip" title="Metacritic">MC ${m.metacritic}</span>`);
+  return bits.length ? `<div class="scores">${bits.join('')}</div>` : '';
+}
+
+// "Where to watch" using TMDB/JustWatch data for the chosen region.
+function whereHtml(m) {
+  const info = streamingInfo(m, state.settings.region);
+  if (!info) return '';
+  const chip = p => `<span class="svc">${p.logo ? `<img src="${esc(imageUrl(p.logo, 'w92'))}" alt="" loading="lazy">` : ''}${esc(p.name)}</span>`;
+  if (info.stream.length) return `<div class="where"><span class="muted">Stream on</span> ${info.stream.slice(0, 5).map(chip).join('')}</div>`;
+  if (info.rent.length) return `<div class="where"><span class="muted">Not on a subscription. Rent or buy:</span> ${info.rent.slice(0, 4).map(chip).join('')}</div>`;
+  return `<div class="where muted">Not available to stream in ${esc(state.settings.region)} right now.</div>`;
+}
+
+function statusLabel(meta) {
+  const k = findKey(meta);
+  if (k) { const i = state.order.indexOf(k); return `<span class="tag good">Watched${i >= 0 ? ` · #${i + 1}` : ''}</span>`; }
+  return onWatchlist(meta) ? '<span class="tag">On watchlist</span>' : '';
+}
+
+function toggleWatchlist(meta) {
+  const i = state.watchlist.findIndex(m => m.key === meta.key || (meta.tmdbId && m.tmdbId === meta.tmdbId));
+  if (i >= 0) state.watchlist.splice(i, 1);
+  else state.watchlist.push({ ...meta, providers: null, overview: meta.overview || '' });
+  persist();
+}
+
+// Add a film I just watched, then go straight to ranking it.
+function logFilm(meta, date = today()) {
+  const existingKey = findKey(meta), key = existingKey || movieKey(meta.title, meta.year);
+  const existing = state.movies[key];
+  const clean = { ...meta, key };
+  state.movies[key] = existing ? { ...existing, meta: { ...existing.meta, ...clean }, watchedDate: date }
+    : { key, title: meta.title, year: meta.year, rating: null, watchedDate: date, sources: ['logged'], meta: clean };
+  state.watchlist = state.watchlist.filter(m => m.key !== meta.key && !(meta.tmdbId && m.tmdbId === meta.tmdbId));
+  persist();
+  const api = tmdb(); // fill runtime / director in the background
+  if (api && meta.tmdbId) api.details(meta.tmdbId).then(d => { state.movies[key].meta = { ...state.movies[key].meta, ...d, key }; persist(); }).catch(() => {});
+  ui.picks = null; ui.detail = null; ui.spot = null; ui.search = { mode: 'log', key: null, q: '', results: [], note: '' };
+  if (existing && R.isRanked(state.order, key)) { ui.status = `${meta.title} is already on your list (#${state.order.indexOf(key) + 1}).`; ui.tab = 'library'; return render(); }
+  startRanking(key);
+}
+
+// The metas behind each clickable list, so buttons only need (source, index).
+function srcMeta(src, i) {
+  switch (src) {
+    case 'picks': return ui.picks[i].meta;
+    case 'results': return findList()[i];
+    case 'watchlist': return state.watchlist[i];
+    case 'top': return state.movies[state.order[i]]?.meta || { title: state.movies[state.order[i]].title, year: state.movies[state.order[i]].year, key: state.order[i], genres: [] };
+    case 'spot': return ui.spot;
+    default: return ui.detail?.meta;
+  }
+}
+
+// ---- Details sheet (synopsis, scores, where to watch) ----------------------------
+const $modal = document.getElementById('modal');
+function renderModal() {
+  const d = ui.detail;
+  $modal.hidden = !d;
+  document.body.classList.toggle('noscroll', Boolean(d));
+  if (!d) { $modal.innerHTML = ''; return; }
+  const m = view(d.meta), k = findKey(m);
+  $modal.innerHTML = `<div class="backdrop" data-act="close-detail"><div class="sheet" role="dialog" aria-label="${esc(m.title)}">
+    <button class="close" data-act="close-detail" aria-label="Close">✕</button>
+    <div class="sheet-grid"><div class="sheet-poster">${poster(m, m.title, '(max-width:720px) 40vw, 240px')}</div>
+    <div><h2>${esc(m.title)}</h2>
+      <div class="meta">${esc(m.year ?? '')}${m.runtime ? ` · ${m.runtime} min` : ''}${(m.genres || []).length ? ` · ${esc(m.genres.join(', '))}` : ''}</div>
+      ${(m.directors || []).length ? `<div class="meta">Directed by ${esc(m.directors.join(', '))}</div>` : ''}
+      <div class="row tight">${statusLabel(m)}</div>
+      ${scoresHtml(m)}${d.loading && !m.rt ? '<div class="muted">Loading scores…</div>' : ''}
+      <p class="synopsis full">${esc(m.overview || 'No synopsis available.')}</p>
+      ${whereHtml(m)}
+      <div class="actions">
+        ${k ? '' : '<button class="primary" data-act="detail-watched">I\'ve watched this</button>'}
+        <button class="secondary" data-act="detail-list">${onWatchlist(m) ? '✓ On watchlist (remove)' : '+ Add to watchlist'}</button>
+      </div></div></div></div></div>`;
+}
+document.addEventListener('keydown', e => { if (e.key === 'Escape' && ui.detail) { ui.detail = null; renderModal(); } });
+
+async function openDetail(meta) {
+  ui.detail = { meta, loading: true }; renderModal();
+  const full = await fullMeta(meta);
+  if (ui.detail?.meta === meta || ui.detail?.meta.tmdbId === meta.tmdbId) { ui.detail = { meta: full, loading: false }; renderModal(); }
+  // Keep scores on films I own so lists can show them without refetching.
+  const w = state.watchlist.findIndex(x => x.key === meta.key); if (w >= 0 && full.rt != null) { state.watchlist[w] = { ...state.watchlist[w], rt: full.rt, imdb: full.imdb, metacritic: full.metacritic }; persist(false); }
+}
+
+// ---- Find: search and browse all films ----------------------------------------------
+const BROWSE = [['popular', 'Popular'], ['top', 'Top rated'], ['new', 'New']];
+const findList = () => (ui.search.mode === 'log' && ui.search.q.trim().length >= 2 ? ui.search.results : ui.browse.items);
+
+function rowHtml(m0, i, src) {
+  const m = view(m0);
+  return `<div class="result" data-act="detail" data-src="${src}" data-i="${i}">
+    <div class="thumb">${poster(m, m.title, '56px')}</div>
+    <div class="info"><div class="t">${esc(m.title)} <span class="muted">${esc(m.year ?? '')}</span> ${statusLabel(m)}</div>
+      <div class="muted clamp">${esc(m.overview || (m.genres || []).join(', '))}</div>${scoresHtml(m)}</div>
+    <div class="row-actions">${findKey(m) ? '' : `<button class="chip-btn" data-act="row-watched" data-src="${src}" data-i="${i}">Watched</button>`}
+      <button class="chip-btn" data-act="row-list" data-src="${src}" data-i="${i}">${onWatchlist(m) ? '✓ List' : '+ List'}</button></div>
+  </div>`;
+}
+
+function findListHtml() {
+  const searching = ui.search.mode === 'log' && ui.search.q.trim().length >= 2;
+  const items = findList();
+  const rows = items.map((m, i) => rowHtml(m, i, 'results')).join('');
+  const manual = searching ? `<div class="result"><div class="info"><div class="t">Can't find it?</div><div class="muted">Add "${esc(ui.search.q.trim())}" without a lookup</div></div>
       <button class="chip-btn" data-act="log-manual">Add</button></div>` : '';
-  return `${note ? `<p class="muted">${esc(note)}</p>` : ''}${rows}${manual}`;
+  const more = !searching && ui.browse.items.length ? `<div class="row" style="justify-content:center"><button class="secondary" data-act="browse-more" ${ui.browse.loading || ui.browse.done ? 'disabled' : ''}>${ui.browse.loading ? 'Loading…' : 'Load more'}</button></div>` : '';
+  const empty = !items.length && (searching ? ui.search.note : (ui.browse.loading ? 'Loading…' : '')) ;
+  return `${empty ? `<p class="muted">${esc(empty)}</p>` : ''}${rows}${manual}${more}`;
 }
 
-function renderLog() {
-  const recent = Object.values(state.movies).filter(m => m.sources?.includes('logged'))
-    .sort((a, b) => (b.watchedDate || '').localeCompare(a.watchedDate || '')).slice(0, 5);
-  const pos = Object.fromEntries(state.order.map((k, i) => [k, i + 1]));
-  return `<section class="hero"><h2>Log a film</h2><p>Just watched something? Add it here and rank it. No need to touch Letterboxd.</p></section>
+function renderFind() {
+  const q = ui.search.mode === 'log' ? ui.search.q : '';
+  return `<section class="hero"><h2>Find films</h2><p>Search every film, or browse. See the synopsis, Rotten Tomatoes score and where it's streaming, then add it as watched or to your watchlist.</p></section>
     ${ui.status ? `<p class="banner">${esc(ui.status)}</p>` : ''}
-    <div class="panel">
-      <input id="log-q" type="search" class="wide" placeholder="Search for a film…" autocomplete="off" value="${ui.search.mode === 'log' ? esc(ui.search.q) : ''}">
-      <div class="row"><label class="muted">Watched on <input type="date" id="log-date" value="${today()}" max="${today()}"></label></div>
-      <div id="log-results">${ui.search.mode === 'log' ? searchResultsHtml() : ''}</div>
+    <input id="log-q" type="search" class="wide" placeholder="Search for a film…" autocomplete="off" value="${esc(q)}">
+    <div class="filters" style="margin-top:12px">
+      <div><span class="muted">Browse</span><div class="seg">${BROWSE.map(([v, l]) => `<button class="${ui.browse.kind === v ? 'on' : ''}" data-act="browse-kind" data-v="${v}">${l}</button>`).join('')}</div></div>
+      <label class="select"><span class="muted">Genre</span><select data-filter="browse-genre"><option value="">Any genre</option>${GENRES.map(g => `<option ${ui.browse.genre === g ? 'selected' : ''}>${esc(g)}</option>`).join('')}</select></label>
+      <label class="muted">Watched on <input type="date" id="log-date" value="${today()}" max="${today()}"></label>
     </div>
-    ${recent.length ? `<h3 class="sub">Recently logged</h3><ul class="plain">${recent.map(m => `<li>${esc(m.title)} <span class="muted">${esc(m.year ?? '')}${pos[m.key] ? ` · #${pos[m.key]}` : ''}</span></li>`).join('')}</ul>` : ''}`;
+    <div id="log-results">${findListHtml()}</div>`;
 }
+
+async function loadBrowse(reset = false) {
+  const b = ui.browse;
+  if (reset) Object.assign(b, { page: 0, items: [], done: false });
+  if (b.loading || b.done) return;
+  b.loading = true; updateFindList();
+  const y = new Date().getFullYear();
+  try {
+    const api = tmdb();
+    if (!api) { b.items = DEMO_CATALOG.filter(m => !b.genre || m.genres.includes(b.genre)); b.done = true; }
+    else {
+      const shape = { popular: { sortBy: 'popularity.desc', minVotes: 200 }, top: { sortBy: 'vote_average.desc', minVotes: 3000 }, new: { sortBy: 'popularity.desc', minVotes: 50, dateGte: `${y - 1}-01-01` } }[b.kind];
+      const rs = await api.discover({ ...shape, genreIds: b.genre ? [GENRE_NAME_TO_ID[b.genre]] : [], genreMode: 'and', page: ++b.page });
+      b.items.push(...rs.filter(r => !b.items.some(x => x.tmdbId === r.tmdbId)));
+      if (!rs.length || b.page >= 25) b.done = true;
+    }
+  } catch (e) { ui.search.note = e.message; b.done = true; }
+  b.loading = false; updateFindList();
+}
+function updateFindList() { const el = document.getElementById('log-results'); if (el) el.innerHTML = findListHtml(); }
 
 let searchTimer = null;
 function runSearch(q, mode) {
   ui.search = { ...ui.search, mode, q, results: [], note: '' };
   clearTimeout(searchTimer);
   const target = () => document.getElementById(mode === 'fix' ? 'fix-results' : 'log-results');
-  if (q.trim().length < 2) { if (target()) target().innerHTML = ''; return; }
+  if (q.trim().length < 2) { if (mode === 'fix' && target()) target().innerHTML = ''; else updateFindList(); return; }
   searchTimer = setTimeout(async () => {
     const mine = ui.search.q;
     try {
       const api = tmdb();
-      const results = api ? await api.searchMany(q)
-        : DEMO_CATALOG.filter(m => norm(m.title).includes(norm(q)) ).slice(0, 8);
+      const results = api ? await api.searchMany(q) : DEMO_CATALOG.filter(m => norm(m.title).includes(norm(q))).slice(0, 8);
       if (mine !== ui.search.q) return; // typed something newer meanwhile
       ui.search.results = results;
       ui.search.note = results.length ? '' : 'No matches.';
     } catch (e) { ui.search.note = e.message; }
-    if (target()) target().innerHTML = searchResultsHtml();
+    if (mode === 'fix') { if (target()) target().innerHTML = searchResultsHtml(); } else updateFindList();
   }, 300);
 }
 
-// Add a film I just watched, then go straight to ranking it.
-function logFilm(meta, date) {
-  const key = movieKey(meta.title, meta.year);
-  const existing = state.movies[key];
-  state.movies[key] = existing ? { ...existing, meta: { ...meta, key }, watchedDate: date }
-    : { key, title: meta.title, year: meta.year, rating: null, watchedDate: date, sources: ['logged'], meta: { ...meta, key } };
-  persist();
-  const api = tmdb(); // fill runtime / director / streaming in the background
-  if (api && meta.tmdbId) api.details(meta.tmdbId).then(d => { state.movies[key].meta = { ...state.movies[key].meta, ...d, key }; persist(); }).catch(() => {});
-  ui.picks = null; ui.search = { mode: 'log', key: null, q: '', results: [], note: '' };
-  if (existing && R.isRanked(state.order, key)) { ui.status = `${meta.title} is already on your list (#${state.order.indexOf(key) + 1}).`; return render(); }
-  startRanking(key);
+// Used only by the "fix a missing poster" panel (Settings → Import).
+function searchResultsHtml() {
+  const { results, note } = ui.search;
+  return `${note ? `<p class="muted">${esc(note)}</p>` : ''}${results.map((m, i) => `<div class="result">
+      <div class="thumb">${poster(m, m.title, '56px')}</div>
+      <div class="info"><div class="t">${esc(m.title)} <span class="muted">${esc(m.year ?? '')}</span></div>
+        <div class="muted clamp">${esc(m.overview || (m.genres || []).join(', '))}</div></div>
+      <button class="chip-btn" data-act="fix-pick" data-i="${i}">Use this</button></div>`).join('')}`;
+}
+
+// ---- Watchlist + "pick one for me" ---------------------------------------------------
+function renderWatchlist() {
+  const list = state.watchlist;
+  const spot = ui.spot && view(ui.spot);
+  const spotHtml = spot ? `<div class="spotlight"><div class="eyebrow">Tonight, watch</div>
+      <div class="pick first"><div class="pick-poster">${poster(spot, spot.title, '(max-width:720px) 34vw, 220px')}</div>
+        <div class="pick-body"><h3>${esc(spot.title)}</h3>
+          <div class="meta">${esc(spot.year ?? '')}${spot.runtime ? ` · ${spot.runtime} min` : ''} · ${esc((spot.genres || []).slice(0, 3).join(', '))}</div>
+          ${scoresHtml(spot)}<p class="synopsis">${esc(spot.overview || '')}</p>${whereHtml(spot) || '<div class="muted">Checking where it\'s streaming…</div>'}
+          <div class="actions"><button class="primary" data-act="spot-watched">I watched it</button>
+            <button class="secondary" data-act="spot-again">🎲 Pick another</button>
+            <button class="ghost" data-act="spot-close">Not tonight</button></div></div></div></div>` : '';
+  const rows = list.map((m0, i) => {
+    const m = view(m0);
+    return `<div class="result" data-act="detail" data-src="watchlist" data-i="${i}">
+      <div class="thumb">${poster(m, m.title, '56px')}</div>
+      <div class="info"><div class="t">${esc(m.title)} <span class="muted">${esc(m.year ?? '')}</span></div>${scoresHtml(m)}${whereHtml(m)}</div>
+      <div class="row-actions"><button class="chip-btn" data-act="row-watched" data-src="watchlist" data-i="${i}">Watched</button>
+        <button class="chip-btn quiet" data-act="wl-remove" data-i="${i}" aria-label="Remove">✕</button></div></div>`;
+  }).join('');
+  return `<section class="hero"><h2>Watchlist</h2><p>Can't choose? Let me pick.</p></section>
+    <div class="row"><button class="primary big" data-act="spot-pick" ${list.length ? '' : 'disabled'}>🎲 Pick one for me</button>
+      <label class="toggle"><input type="checkbox" data-act="spot-stream" ${ui.spotStreamOnly ? 'checked' : ''}> Only what I can stream</label></div>
+    ${ui.status ? `<p class="banner">${esc(ui.status)}</p>` : ''}${spotHtml}
+    ${list.length ? `<div class="wl">${rows}</div>` : '<div class="empty"><div class="big">🔖</div><p>Nothing saved yet. Add films from <a href="#" data-tab-link="find">Find</a> or Next Watch.</p></div>'}`;
+}
+
+async function pickFromWatchlist() {
+  let pool = state.watchlist;
+  if (ui.spotStreamOnly) {
+    ui.status = 'Checking what\'s streaming…'; render();
+    await fillAll(pool, { scores: false });
+    pool = pool.filter(m => streamingInfo(view(m), state.settings.region)?.stream.length);
+    ui.status = pool.length ? '' : 'Nothing on your watchlist is streaming right now. Untick the filter to pick from everything.';
+  }
+  const others = pool.filter(m => m.key !== ui.spot?.key);
+  const choice = (others.length ? others : pool)[Math.floor(Math.random() * (others.length || pool.length))];
+  ui.spot = choice || null; render();
+  if (choice) { ui.spot = await fullMeta(choice); ui.spot = choice; safeRender(); }
 }
 
 // ---- Rank (Beli-style) --------------------------------------------------------
@@ -562,6 +751,10 @@ function renderSettings() {
         <div class="row"><input id="s-pass" type="password" size="30" placeholder="Passphrase" autocomplete="current-password"><button class="primary" data-act="login">Sign in</button></div>
         ${ui.authError ? `<p class="banner">${esc(ui.authError)}</p>` : ''}`
       : `<p class="muted">Cross-device sync isn't set up on the server yet (see the README). Until then, data stays in this browser.</p>`}</div>
+    <div class="panel"><b>Rotten Tomatoes scores</b>
+      ${ui.omdbProxy ? '<p class="muted">✓ The server has your OMDb key. Scores show on film details.</p>'
+        : `<p class="muted">Scores come from OMDb (free key at omdbapi.com). Add it as <code>OMDB_API_KEY</code> in Vercel, or paste it here for this device only.</p>
+        <input id="s-omdb" type="password" size="30" value="${esc(state.settings.omdbKey)}" placeholder="OMDb API key">`}</div>
     <div class="panel"><b>TMDB API key</b>
       ${ui.proxy ? '<p class="muted">✓ The server already has your TMDB key, so you can leave this blank.</p>' : ''}
       <p class="muted">Free at themoviedb.org → Settings → API. Used for posters, genres, recommendations and "where to stream". Stored only in this browser.</p>
@@ -569,11 +762,12 @@ function renderSettings() {
     <div class="panel"><b>Streaming</b>
       <p class="muted">Region (2-letter code) and services as TMDB names, comma-separated, e.g. <i>Netflix, Max, Hulu</i>. Leave services empty to show any.</p>
       <div class="row"><input id="s-region" size="3" value="${esc(s.region)}"><input id="s-services" size="40" value="${esc(s.services.join(', '))}"></div></div>
-    <div class="row"><button class="primary" data-act="save-settings">Save</button></div>`;
+    <div class="row"><button class="primary" data-act="save-settings">Save</button></div>
+    ${viewOnly() ? '' : `<h2 class="sub big">Import &amp; library</h2>${renderImport()}`}`;
 }
 
 // ---- Events -------------------------------------------------------------------
-$app.addEventListener('click', async e => {
+async function onClick(e) {
   const link = e.target.closest('[data-tab-link]');
   if (link) { e.preventDefault(); ui.tab = link.dataset.tabLink; ui.status = ''; return render(); }
   const mood = e.target.closest('[data-mood]');
@@ -582,18 +776,19 @@ $app.addEventListener('click', async e => {
   if (segBtn) { ui.filters[segBtn.dataset.seg] = segBtn.dataset.v; return loadPicks(); }
   const btn = e.target.closest('[data-act]'); if (!btn) return;
   const { act } = btn.dataset, s = ui.session;
-  if (viewOnly() && !['shuffle', 'theme', 'export', 'login', 'logout', 'goto-signin', 'stream-only'].includes(act)) { ui.tab = 'settings'; return render(); }
+  if (act === 'close-detail' && e.target !== btn && !e.target.closest('.close')) return; // clicks inside the sheet stay open
+  if (viewOnly() && !['shuffle', 'theme', 'export', 'login', 'logout', 'goto-signin', 'stream-only', 'detail', 'close-detail', 'spot-pick', 'spot-again', 'spot-close', 'spot-stream'].includes(act)) { ui.detail = null; renderModal(); ui.tab = 'settings'; return render(); }
   const i = +btn.dataset.i;
   switch (act) {
     case 'shuffle': return shuffle();
     case 'stream-only': ui.streamOnly = btn.checked; return loadPicks();
     case 'hide': state.hidden.push(ui.picks[i].meta.key); dropPick(i); persist(); return render();
-    case 'watchlist': state.watchlist.push(ui.picks[i].meta); dropPick(i); persist(); return render();
+    case 'watchlist': toggleWatchlist(view(ui.picks[i].meta)); dropPick(i); return render();
     case 'unlist': state.watchlist = state.watchlist.filter(m => m.key !== ui.picks[i].meta.key); dropPick(i); persist(); return render();
     case 'seen': {
       const meta = ui.picks[i].meta;
       state.watchlist = state.watchlist.filter(m => m.key !== meta.key);
-      logFilm(meta, today()); // "what did you think?" starts the ranking
+      logFilm(view(meta)); // "what did you think?" starts the ranking
       return;
     }
     case 'log-pick': return logFilm(ui.search.results[i], document.getElementById('log-date')?.value || today());
@@ -647,6 +842,19 @@ $app.addEventListener('click', async e => {
       mergeIntoLibrary(state, [{ title, year, rating: null, watchedDate: null, source: 'manual' }]);
       persist(); if (!isDemo()) enrichLibrary(); ui.status = `Added ${title}.`; return render();
     }
+    case 'detail': return openDetail(srcMeta(btn.dataset.src, +btn.dataset.i));
+    case 'close-detail': ui.detail = null; return renderModal();
+    case 'detail-watched': return logFilm(view(ui.detail.meta));
+    case 'detail-list': toggleWatchlist(view(ui.detail.meta)); renderModal(); return safeRender();
+    case 'row-watched': return logFilm(view(srcMeta(btn.dataset.src, i)));
+    case 'row-list': toggleWatchlist(view(srcMeta(btn.dataset.src, i))); return ui.tab === 'find' ? updateFindList() : render();
+    case 'wl-remove': state.watchlist.splice(i, 1); persist(); return render();
+    case 'browse-kind': ui.browse.kind = btn.dataset.v; render(); return loadBrowse(true);
+    case 'browse-more': return loadBrowse();
+    case 'spot-pick': case 'spot-again': return pickFromWatchlist();
+    case 'spot-close': ui.spot = null; return render();
+    case 'spot-watched': return logFilm(view(ui.spot));
+    case 'spot-stream': ui.spotStreamOnly = btn.checked; return;
     case 'login': return signIn(document.getElementById('s-pass').value);
     case 'logout': return signOut();
     case 'goto-signin': ui.tab = 'settings'; return render();
@@ -660,12 +868,15 @@ $app.addEventListener('click', async e => {
     case 'wipe': if (confirm('Erase your library, rankings and settings from this browser?')) { localStorage.clear(); location.reload(); } return;
     case 'save-settings':
       state.settings.tmdbKey = document.getElementById('s-key').value.trim();
+      state.settings.omdbKey = document.getElementById('s-omdb')?.value.trim() ?? state.settings.omdbKey;
       state.settings.region = document.getElementById('s-region').value.trim().toUpperCase() || 'US';
       state.settings.services = document.getElementById('s-services').value.split(',').map(x => x.trim()).filter(Boolean);
       persist(false); ui.status = 'Saved.'; ui.tab = 'recommend';
       render(); if (!isDemo()) enrichLibrary(); return;
   }
-});
+}
+$app.addEventListener('click', onClick);
+$modal.addEventListener('click', onClick);
 $app.addEventListener('input', e => {
   if (e.target.id === 'log-q') runSearch(e.target.value, 'log');
   if (e.target.id === 'fix-q') runSearch(e.target.value, 'fix');
@@ -673,6 +884,7 @@ $app.addEventListener('input', e => {
 $app.addEventListener('change', e => {
   if (viewOnly() && /^file-/.test(e.target.id)) return;
   if (e.target.dataset.filter === 'genre') { ui.filters.genre = e.target.value; loadPicks(); }
+  if (e.target.dataset.filter === 'browse-genre') { ui.browse.genre = e.target.value; render(); loadBrowse(true); }
   if (e.target.id === 'file-restore') restoreBackup(e.target);
   if (e.target.id === 'file-lb' || e.target.id === 'file-other') handleFiles(e.target);
 });
@@ -714,12 +926,16 @@ const locked = title => `<section class="hero"><h2>${title}</h2><p>This is a rea
   <div class="panel"><p>Sign in on this device to make changes.</p><div class="row"><button class="primary" data-act="goto-signin">Sign in</button></div></div>`;
 
 function render() {
+  if (ui.tab === 'import' || ui.tab === 'log') ui.tab = ui.tab === 'log' ? 'find' : 'settings';
   renderNav();
+  if (ui.tab === 'find' && !viewOnly() && !ui.browse.items.length && !ui.browse.loading && !ui.browse.done) setTimeout(() => loadBrowse(), 0);
+  if (ui.tab === 'watchlist') { const sig = state.watchlist.map(m => m.key).join(); if (ui.wlSig !== sig) { ui.wlSig = sig; setTimeout(() => fillAll(state.watchlist), 0); } }
   if (ui.tab === 'recommend' && ui.picks === null && !ui.loading && Object.keys(state.movies).length) setTimeout(loadPicks, 0); // auto-recommend
-  const view = { recommend: renderRecommend, log: renderLog, rank: renderRank, library: renderLibrary, import: renderImport, settings: renderSettings };
-  const lock = viewOnly() && ['log', 'rank', 'import'].includes(ui.tab);
+  const view = { recommend: renderRecommend, find: renderFind, watchlist: renderWatchlist, rank: renderRank, library: renderLibrary, settings: renderSettings };
+  renderModal();
+  const lock = viewOnly() && ['find', 'rank'].includes(ui.tab);
   $app.innerHTML = (viewOnly() && ui.tab !== 'settings' ? `<div class="banner">👀 Read-only. <a href="#" data-tab-link="settings">Sign in</a> on this device to edit.</div>` : '')
-    + (lock ? locked({ log: 'Log a film', rank: 'Rank', import: 'Import' }[ui.tab]) : view[ui.tab]());
+    + (lock ? locked({ find: 'Find films', rank: 'Rank' }[ui.tab]) : view[ui.tab]());
 }
 render();
 (async () => {

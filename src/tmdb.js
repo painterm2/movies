@@ -21,6 +21,7 @@ export function normalize(raw) {
     vote: raw.vote_count >= 100 ? raw.vote_average : null,
     poster: raw.poster_path || null,
     overview: raw.overview || '',
+    imdbId: raw.imdb_id || raw.external_ids?.imdb_id || null,
     providers: raw['watch/providers']?.results || null,
   };
 }
@@ -75,7 +76,7 @@ export function createClient({ key, proxy = false, fetchImpl = globalThis.fetch 
     },
     // Free-text search for the Log screen: several candidates, already normalized.
     searchMany: async query => (await get('/search/movie', { query })).results.slice(0, 8).map(normalize),
-    details: id => get(`/movie/${id}`, { append_to_response: 'credits,watch/providers' }).then(normalize),
+    details: id => get(`/movie/${id}`, { append_to_response: 'credits,watch/providers,external_ids' }).then(normalize),
     recommendations: id => get(`/movie/${id}/recommendations`).then(r => r.results.map(normalize)),
     // genreMode 'or' = any of the genres, 'and' = all of them.
     discover: ({ genreIds = [], genreMode = 'or', minVotes = 500, page = 1, sortBy = 'vote_average.desc', dateGte, dateLte } = {}) =>
@@ -93,4 +94,12 @@ export function streamingOn(meta, region, services) {
   const flat = meta.providers?.[region]?.flatrate || [];
   const names = flat.map(p => p.provider_name);
   return services.length ? names.filter(n => services.includes(n)) : names;
+}
+
+// Where to watch in `region`: subscription ("stream"), then rent/buy. null = not loaded yet.
+export function streamingInfo(meta, region) {
+  if (!meta.providers) return null;
+  const r = meta.providers[region] || {};
+  const pick = list => (list || []).map(p => ({ name: p.provider_name, logo: p.logo_path }));
+  return { stream: pick(r.flatrate), rent: pick([...(r.rent || []), ...(r.buy || [])]).filter((p, i, a) => a.findIndex(x => x.name === p.name) === i) };
 }

@@ -24,10 +24,13 @@ No build step or dependencies. All data lives in your browser's localStorage; yo
 Import the repo in Vercel (framework: Other, no build command). `vercel.json` serves the repo root as a static site.
 
 ### Sync across devices (phone, laptop…)
-Your library lives in a Redis database behind `/api/state`, protected by one passphrase.
-1. Vercel project → **Storage** → create/connect **Upstash Redis** (Marketplace). This adds the `KV_REST_API_*` / `UPSTASH_REDIS_REST_*` env vars.
-2. **Settings → Environment Variables**, add:
-   - `SYNC_PASSWORD`: a passphrase you choose (the API refuses to run without it)
-   - `TMDB_API_KEY`: optional; keeps your TMDB key on the server so devices don't need it
-3. Redeploy. On each device: **Settings** → enter the passphrase → Save.
-The app pulls on load and when you return to the tab, and pushes shortly after each change. If two devices edited, they're merged (nothing added is lost; the more recent device wins ordering). Device-local: passphrase and TMDB key.
+Your library lives in a Redis database behind `/api/state`.
+1. Vercel project → **Storage** → create/connect **Upstash Redis** (Marketplace).
+2. **Settings → Environment Variables**:
+   - `SYNC_PASSWORD`: your passphrase (the API refuses to run without it)
+   - `TMDB_API_KEY`: posters, search, recommendations, where-to-stream (themoviedb.org → Settings → API)
+   - `OMDB_API_KEY`: Rotten Tomatoes / IMDb / Metacritic scores (free at omdbapi.com)
+   - optional `REQUIRE_LOGIN_TO_VIEW=1` to hide the library from signed-out visitors too
+3. Redeploy.
+
+**Access model.** Anyone opening the site can *view* your library (no passcode). Changing it, plus search, recommendations and ratings (which use your API keys), needs a one-time sign-in per device: Settings → Sign in. That sets a year-long HttpOnly cookie, so you stay signed in. The passphrase is never stored in the page.
