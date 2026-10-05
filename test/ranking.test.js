@@ -75,3 +75,35 @@ test('refine swap', () => {
   R.swapPair(order, R.pickRefinePair(order, () => 0));
   assert.deepEqual(order, ['b', 'a', 'c']);
 });
+
+test('full re-rank without stars reproduces the user\'s true order', () => {
+  const movies = Object.fromEntries('abcdefghij'.split('').map(k => [k, { key: k, rating: 5 }]));
+  const truth = 'jhfdbacegi'.split('');
+  const queue = R.planRerank(movies, { useStars: false });
+  const list = []; let asked = 0;
+  for (const key of queue) {
+    let s = R.startInsertion(list.length);
+    while (!R.isDone(s)) { s = R.answer(s, truth.indexOf(key) < truth.indexOf(list[R.probeIndex(s)])); asked++; }
+    R.insertAt(list, key, R.position(s));
+  }
+  assert.deepEqual(list, truth);
+  assert.ok(asked <= R.estimateQuestions(movies, queue, false));
+});
+
+test('star head-start keeps star groups together and asks fewer questions', () => {
+  const rated = { a: 5, b: 5, c: 5, d: 4, e: 4, f: 3, g: null };
+  const movies = Object.fromEntries(Object.entries(rated).map(([k, rating]) => [k, { key: k, rating }]));
+  const truth = ['c', 'a', 'b', 'e', 'd', 'f', 'g']; // user's order within each star group
+  const queue = R.planRerank(movies, { useStars: true });
+  assert.deepEqual(queue.map(k => rated[k] ?? -1), [5, 5, 5, 4, 4, 3, -1]);
+  const list = []; let asked = 0;
+  for (const key of queue) {
+    const [lo, hi] = rated[key] != null ? R.starWindow(list, movies, rated[key]) : [0, list.length];
+    let s = R.startInsertion(list.length, lo, hi);
+    while (!R.isDone(s)) { s = R.answer(s, truth.indexOf(key) < truth.indexOf(list[R.probeIndex(s)])); asked++; }
+    R.insertAt(list, key, R.position(s));
+  }
+  assert.deepEqual(list, truth);
+  assert.ok(asked <= R.estimateQuestions(movies, queue, true));
+  assert.ok(R.estimateQuestions(movies, queue, true) < R.estimateQuestions(movies, queue, false));
+});

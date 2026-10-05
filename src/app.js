@@ -8,6 +8,15 @@ import { DEMO_CATALOG, demoLibrary } from './demo.js';
 import { unzipText, isLetterboxdTasteFile } from './unzip.js';
 import { createSyncClient, mergeStates } from './sync.js';
 
+const THEME_KEY = 'reel-taste:theme';
+const getTheme = () => { try { return localStorage.getItem(THEME_KEY) || 'dark'; } catch { return 'dark'; } };
+function setTheme(t) {
+  try { localStorage.setItem(THEME_KEY, t); } catch { /* private mode */ }
+  document.documentElement.dataset.theme = t;
+  document.querySelector('meta[name=theme-color]')?.setAttribute('content', t === 'light' ? '#f7f6f3' : '#0b0b10');
+}
+setTheme(getTheme());
+
 const state = load();
 const ui = { proxy: false, sync: '', tab: 'recommend', mood: null, recs: null, loading: '', status: '', session: null, streamOnly: false };
 const $app = document.getElementById('app');
@@ -130,12 +139,21 @@ async function fetchCandidates() {
   return prelim.map(({ meta, sources }) => ({ meta, sources }));
 }
 
-// Real poster when we have one, otherwise a tinted title card (stable colour per title).
-function poster(meta, title, size = 'w342') {
-  const url = meta?.poster ? imageUrl(meta.poster, size) : null;
-  if (url) return `<div class="poster"><img src="${esc(url)}" alt="${esc(title)} poster" loading="lazy"></div>`;
-  let h = 0; for (const c of title) h = (h * 31 + c.charCodeAt(0)) % 360;
-  return `<div class="poster fallback" style="background:linear-gradient(160deg,hsl(${h} 45% 32%),hsl(${(h + 40) % 360} 50% 14%))">${esc(title)}</div>`;
+// Fallback tint by genre so a missing poster still "feels" like the film.
+const GENRE_HUE = { Horror: 355, 'Science Fiction': 188, Animation: 38, Fantasy: 272, Romance: 336, Comedy: 46, Crime: 24,
+  War: 92, Thriller: 214, Mystery: 246, Action: 12, Adventure: 160, Music: 292, Family: 140, History: 30, Western: 28, Documentary: 120, Drama: 205 };
+function tint(meta, title) {
+  const g = (meta?.genres || []).find(x => GENRE_HUE[x]);
+  let h = g ? GENRE_HUE[g] : [...title].reduce((a, c) => (a * 31 + c.charCodeAt(0)) % 360, 0);
+  return `linear-gradient(160deg,hsl(${h} 52% 34%),hsl(${(h + 28) % 360} 55% 12%))`;
+}
+
+// Real poster at several resolutions (browser picks the sharp one for the screen);
+// until it loads, or if there's none, a genre-tinted title card shows instead.
+function poster(meta, title, sizes = '(max-width:720px) 46vw, 200px') {
+  const path = meta?.poster;
+  const img = path ? `<img src="${esc(imageUrl(path, 'w500'))}" srcset="${['w342 342', 'w500 500', 'w780 780'].map(x => { const [sz, w] = x.split(' '); return `${esc(imageUrl(path, sz))} ${w}w`; }).join(', ')}" sizes="${sizes}" alt="${esc(title)} poster" loading="lazy" decoding="async" onerror="this.remove()">` : '';
+  return `<div class="poster" style="background:${tint(meta, title)}"><span class="ptitle">${esc(title)}</span>${img}</div>`;
 }
 
 function cardHtml(c, i) {
@@ -174,41 +192,87 @@ function renderRecommend() {
 }
 
 // ---- Rank (Beli-style) --------------------------------------------------------
+// The list a session is inserting into: the in-progress list during a re-rank,
+// otherwise your ranking minus the film being placed.
+const sessionList = s => (s.mode === 'rerank' ? state.rerank.order : state.order.filter(k => k !== s.key));
+
+function startRerank(useStars) {
+  const queue = R.planRerank(state.movies, { useStars });
+  state.rerank = { queue, order: [], total: queue.length, useStars };
+  ui.rerankSetup = false; persist(); nextRerank();
+}
+function nextRerank(resumeIns = null) {
+  const rr = state.rerank;
+  if (!rr) return;
+  ui.tab = 'rank';
+  if (!rr.queue.length) {
+    state.order = rr.order; delete state.rerank; ui.session = null; ui.tab = 'library';
+    ui.status = `Re-ranked all ${state.order.length} films. This is your new list.`;
+    persist(); return render();
+  }
+  const key = rr.queue[0], m = state.movies[key];
+  const [lo, hi] = rr.useStars && m.rating != null ? R.starWindow(rr.order, state.movies, m.rating) : [0, rr.order.length];
+  const ins = resumeIns || R.startInsertion(rr.order.length, lo, hi);
+  ui.session = { key, ins, mode: 'rerank', history: [] };
+  return R.isDone(ins) ? finishPlacement() : render();
+}
+
 function startRanking(key) { ui.tab = 'rank';
   const ins = R.startInsertion(state.order.filter(k => k !== key).length);
-  ui.session = { key, step: R.isDone(ins) ? 'done' : 'duel', ins };
+  ui.session = { key, step: R.isDone(ins) ? 'done' : 'duel', ins, history: [] };
   if (ui.session.step === 'done') return finishPlacement();
   render();
 }
 function nextToRank() { const u = unplaced(); return u.length ? u[0].key : null; }
 
 function duelCard(m, attrs) {
-  return `<button class="duel-card" ${attrs}>${poster(m.meta, m.title, 'w342')}
+  return `<button class="duel-card" ${attrs}>${poster(m.meta, m.title, '(max-width:720px) 44vw, 310px')}
     <span class="t">${esc(m.title)}</span><span class="y">${esc(m.year ?? '')}</span></button>`;
 }
 function renderRank() {
   const s = ui.session;
   const left = unplaced().length;
+  const rr = state.rerank;
   if (!s) {
     const placed = state.order.length;
+    if (ui.rerankSetup) {
+      const queue = R.planRerank(state.movies, { useStars: true });
+      const withStars = R.estimateQuestions(state.movies, queue, true), without = R.estimateQuestions(state.movies, queue, false);
+      return `<section class="hero"><h2>Re-rank everything</h2>
+        <p>Start a fresh list and place all ${queue.length} films one at a time. Your current list stays untouched until you finish, and you can pause and pick up later on any device.</p></section>
+        <div class="panel"><b>How should we start?</b>
+          <label class="choice"><input type="radio" name="rr-mode" value="stars" checked>
+            <span><b>Use my star ratings as a head start</b><br><span class="muted">A 5★ stays above a 4★; I only ask you to order films with the same rating. About ${withStars} questions.</span></span></label>
+          <label class="choice"><input type="radio" name="rr-mode" value="fresh">
+            <span><b>Ignore my stars (fully fresh)</b><br><span class="muted">Every film is compared across your whole list. About ${without} questions.</span></span></label>
+        </div>
+        <div class="row"><button class="primary" data-act="rerank-go">Start re-ranking</button><button class="ghost" data-act="rerank-cancel">Back</button></div>`;
+    }
     return `<section class="hero"><h2>Build your ranking</h2>
       <p>I'll ask which you liked more than films already on your list, narrowing down until the new film finds its spot. No need to compare against everything.</p></section>
       <div class="stats"><div class="stat"><b>${placed}</b><span class="muted">ranked</span></div><div class="stat"><b>${left}</b><span class="muted">to rank</span></div></div>
+      ${rr ? `<div class="panel"><b>Re-rank in progress</b><p class="muted">${rr.total - rr.queue.length} of ${rr.total} films placed. Your current list is unchanged until you finish.</p>
+        <div class="row"><button class="primary" data-act="rerank-resume">Resume</button><button class="ghost" data-act="rerank-discard">Discard</button></div></div>` : ''}
       <div class="row">
         <button class="primary" data-act="rank-next" ${left ? '' : 'disabled'}>Rank next film</button>
+        <button class="secondary" data-act="rerank-setup" ${Object.keys(state.movies).length >= 2 && !rr ? '' : 'disabled'}>Re-rank everything</button>
         <button class="secondary" data-act="refine" ${placed >= 2 ? '' : 'disabled'}>Refine a close call</button>
         <button class="ghost" data-act="seed" ${Object.values(state.movies).some(m => m.rating != null && !R.isRanked(state.order, m.key)) ? '' : 'disabled'}>Quick-place by my star ratings</button>
       </div>`;
   }
-  if (s.step === 'duel') {
+  if (s.step === 'duel' || s.mode === 'rerank') {
     const m = state.movies[s.key];
-    const others = state.order.filter(k => k !== s.key);
-    const probe = state.movies[others[R.probeIndex(s.ins)]];
-    return `<div class="center"><h2>Which did you like more?</h2>
+    const probe = state.movies[sessionList(s)[R.probeIndex(s.ins)]];
+    const done = rr && s.mode === 'rerank' ? rr.total - rr.queue.length : 0;
+    return `${s.mode === 'rerank' ? `<div class="progress" aria-label="Re-rank progress"><i style="width:${Math.round(done / rr.total * 100)}%"></i></div>
+      <p class="muted center">Re-ranking · film ${done + 1} of ${rr.total}</p>` : ''}
+      <div class="center"><h2>Which did you like more?</h2>
       <p class="muted">Placing <b>${esc(m.title)}</b>${m.rating != null ? ` (you rated it ${m.rating}★)` : ''} · about ${R.duelsLeft(s.ins)} more</p></div>
       <div class="duel-wrap">${duelCard(m, 'data-act="duel" data-new="1"')}<div class="vs">VS</div>${duelCard(probe, 'data-act="duel" data-new="0"')}</div>
-      <div class="row" style="justify-content:center"><button class="ghost" data-act="skip-duel">Can't compare these</button>
-        <button class="ghost" data-act="rank-stop">Cancel</button></div>`;
+      <div class="row" style="justify-content:center">
+        <button class="ghost" data-act="undo" ${s.history.length || (rr?.last && s.mode === 'rerank') ? '' : 'disabled'}>↶ Undo</button>
+        <button class="ghost" data-act="skip-duel">Can't compare these</button>
+        <button class="ghost" data-act="rank-stop">${s.mode === 'rerank' ? 'Pause' : 'Cancel'}</button></div>`;
   }
   const a = state.movies[s.pair.upper], b = state.movies[s.pair.lower];
   return `<div class="center"><h2>Close call. Which do you prefer?</h2></div>
@@ -225,7 +289,7 @@ function renderLibrary() {
     ${ui.status ? `<p class="banner">${esc(ui.status)}</p>` : ''}
     <ol class="list">${flat.map((k, i) => {
       const m = state.movies[k]; if (!m) return '';
-      return `<li class="item"><span class="n">${i + 1}</span>${poster(m.meta, m.title, 'w185')}
+      return `<li class="item"><span class="n">${i + 1}</span>${poster(m.meta, m.title, '56px')}
         <div><div class="t">${esc(m.title)}</div><div class="muted">${esc(m.year ?? '')}${m.meta?.genres?.length ? ' · ' + esc(m.meta.genres.slice(0, 2).join(', ')) : ''}</div></div>
         <span class="score">${sc[k].toFixed(1)}</span></li>`;
     }).join('')}</ol>`;
@@ -288,6 +352,10 @@ async function handleFiles(input) {
 function renderSettings() {
   const s = state.settings;
   return `<section class="hero"><h2>Settings</h2></section>
+    <div class="panel"><b>Appearance</b>
+      <div class="row">${[['dark', 'Dark'], ['light', 'Light'], ['auto', 'Match device']].map(([v, l]) =>
+        `<button class="${getTheme() === v ? 'primary' : 'secondary'}" data-act="theme" data-v="${v}">${l}</button>`).join('')}</div>
+      <p class="muted">Saved on this device. Dark is the default.</p></div>
     <div class="panel"><b>Sync across devices</b>
       <p class="muted">Enter the passphrase you set as <code>SYNC_PASSWORD</code> in Vercel. Use the same one on every device and your library, rankings and watchlist stay in sync. It's saved only on this device.</p>
       <input id="s-pass" type="password" size="30" value="${esc(s.syncPass)}" placeholder="Sync passphrase">
@@ -325,8 +393,24 @@ $app.addEventListener('click', async e => {
     case 'rank-next': { const k = nextToRank(); return k && startRanking(k); }
     case 'rank-stop': ui.session = null; persist(); return render();
     case 'seed': R.seedFromRatings(state.order, state.movies); persist(); return render();
-    case 'skip-duel': s.ins = R.skip(s.ins); return R.isDone(s.ins) ? finishPlacement() : render();
+    case 'rerank-setup': ui.rerankSetup = true; return render();
+    case 'rerank-cancel': ui.rerankSetup = false; return render();
+    case 'rerank-go': return startRerank(document.querySelector('input[name=rr-mode]:checked')?.value !== 'fresh');
+    case 'rerank-resume': return nextRerank();
+    case 'rerank-discard': if (confirm('Discard the re-rank in progress? Your current list is kept.')) { delete state.rerank; persist(); } return render();
+    case 'undo': {
+      if (s.history.length) { s.ins = s.history.pop(); return render(); }
+      const rr = state.rerank;
+      if (s.mode === 'rerank' && rr?.last) { // step back to the previous film's last question
+        R.removeFromOrder(rr.order, rr.last.key); rr.queue.unshift(rr.last.key);
+        const ins = rr.last.ins; rr.last = null; persist(); return nextRerank(ins);
+      }
+      return;
+    }
+    case 'theme': setTheme(btn.dataset.v); return render();
+    case 'skip-duel': s.history.push(s.ins); s.ins = R.skip(s.ins); return R.isDone(s.ins) ? finishPlacement() : render();
     case 'duel': {
+      s.history.push(s.ins);
       s.ins = R.answer(s.ins, btn.dataset.new === '1');
       return R.isDone(s.ins) ? finishPlacement() : render();
     }
@@ -362,6 +446,13 @@ $app.addEventListener('change', e => {
 function finishPlacement() {
   const s = ui.session;
   const pos = R.position(s.ins);
+  if (s.mode === 'rerank') {
+    R.insertAt(state.rerank.order, s.key, pos);
+    state.rerank.queue.shift();
+    state.rerank.last = { key: s.key, ins: s.history[s.history.length - 1] || null }; // lets Undo step back across films
+    persist();
+    return nextRerank();
+  }
   R.insertAt(state.order, s.key, pos);
   persist();
   const m = state.movies[s.key];

@@ -9,8 +9,9 @@ export const isRanked = (order, key) => order.includes(key);
 // --- Binary insertion session -------------------------------------------------
 // Insert into `length` ranked films. Optional `skipped` indexes are comparisons the user
 // couldn't answer (e.g. can't remember it); the probe moves to the nearest other film.
-export function startInsertion(length) {
-  return { lo: 0, hi: length, skipped: [] };
+// `lo`/`hi` optionally narrow the search to part of the list (see starWindow).
+export function startInsertion(length, lo = 0, hi = length) {
+  return { lo, hi, skipped: [] };
 }
 
 // Index to compare against next, or -1 if every film left in the range was skipped.
@@ -85,4 +86,36 @@ export function pickRefinePair(order, rand = Math.random) {
 // If the user prefers `lower`, swap the pair.
 export function swapPair(order, pair) {
   [order[pair.i], order[pair.i + 1]] = [order[pair.i + 1], order[pair.i]];
+}
+
+// --- Full re-rank -------------------------------------------------------------
+// Rebuild the whole list from scratch: films are inserted one at a time into a new list.
+// With `useStars`, films are inserted best-rated first and each only needs comparing
+// against films with the SAME star rating (a 5★ is assumed above a 4★), which saves
+// a lot of questions. Unrated films are compared against everything.
+export function planRerank(movies, { useStars = true, rand = Math.random } = {}) {
+  const shuffled = Object.values(movies).map(m => ({ m, r: rand() })).sort((a, b) => a.r - b.r).map(x => x.m);
+  if (!useStars) return shuffled.map(m => m.key);
+  return shuffled.sort((a, b) => (b.rating ?? -1) - (a.rating ?? -1)).map(m => m.key);
+}
+
+// Search window [lo, hi) within the in-progress list for a film with star rating `r`.
+export function starWindow(list, movies, r) {
+  let lo = -1, hi = -1;
+  list.forEach((k, i) => { if (movies[k]?.rating === r) { if (lo < 0) lo = i; hi = i + 1; } });
+  if (lo >= 0) return [lo, hi];
+  const n = list.filter(k => (movies[k]?.rating ?? -1) > r).length; // no peers yet: slot in after higher-rated
+  return [n, n];
+}
+
+// Worst-case number of questions for a plan (shown before starting).
+export function estimateQuestions(movies, queue, useStars) {
+  const seen = {}; let total = 0;
+  queue.forEach((key, placed) => {
+    const r = movies[key].rating;
+    const w = useStars && r != null ? (seen[r] || 0) : placed;
+    total += Math.ceil(Math.log2(w + 1));
+    if (r != null) seen[r] = (seen[r] || 0) + 1;
+  });
+  return total;
 }

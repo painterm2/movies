@@ -35,3 +35,11 @@ test('mood filters clashing genres and honors runtime', () => {
   const short = rank(DEMO_CATALOG.map(meta => ({ meta })), profile, { exclude, mood: MOODS.find(m => m.id === 'short') });
   assert.ok(short.every(c => c.meta.runtime <= 100));
 });
+
+import { pickBestMatch } from '../src/tmdb.js';
+test('tmdb match prefers exact title and tolerates a 1-year mismatch, rejects far years', () => {
+  const rs = [{ title: 'Heat (remake)', release_date: '2020-01-01' }, { title: 'Heat', release_date: '1995-12-15' }, { title: 'Heat', release_date: '1986-01-01' }];
+  assert.equal(pickBestMatch(rs, 'Heat', 1996).release_date, '1995-12-15');
+  assert.equal(pickBestMatch(rs, 'Heat', 1900), null);
+  assert.equal(pickBestMatch(rs, 'Heat', null).release_date, '1995-12-15');
+});
