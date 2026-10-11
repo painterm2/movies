@@ -44,3 +44,16 @@ test('tmdb match prefers exact title + nearest year; falls back to exact title; 
   assert.equal(pickBestMatch([{ title: 'Something Else', release_date: '1990-01-01' }], 'Heat', 1995), null);
   assert.equal(pickBestMatch(rs, 'Heat', null).release_date, '1995-12-15');
 });
+
+import { rankSimilar, localSimilar } from '../src/recommend.js';
+test('"movies like this": recommendations outrank similar, watched and self are dropped, no duplicates', () => {
+  const m = (key, genres = ['Drama']) => ({ key, title: key, year: 2000, genres, directors: [], vote: 7 });
+  const profile = buildProfile([]);
+  const out = rankSimilar({ recommended: [m('r1'), m('self'), m('r2')], similar: [m('s1'), m('r1'), m('seen'), m('s2')] }, profile, { exclude: new Set(['seen']), selfKey: 'self' });
+  assert.deepEqual(out.map(c => c.meta.key), ['r1', 'r2', 's1', 's2']);
+  assert.equal(rankSimilar({ recommended: [m('a'), m('b'), m('c')] }, profile, { limit: 2 }).length, 2);
+});
+test('local similar ranks by shared genres and director', () => {
+  const cat = [{ key: 'x', genres: ['Comedy'] }, { key: 'y', genres: ['Drama', 'Crime'], directors: ['D'] }, { key: 'z', genres: ['Drama'] }];
+  assert.deepEqual(localSimilar({ key: 'me', genres: ['Drama', 'Crime'], directors: ['D'] }, cat).map(c => c.key), ['y', 'z']);
+});

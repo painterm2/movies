@@ -94,6 +94,7 @@ test('tmdb proxy: owner only, known paths only, key injected server-side', async
   globalThis.fetch = async u => { seen = String(u); return { status: 200, json: async () => ({ ok: 1 }) }; };
   assert.equal((await call(tmdbHandler, { query: { path: '/movie/1' } })).code, 401);                    // signed-out visitor
   assert.equal((await call(tmdbHandler, { cookie: ownerCookie(), query: { path: '/account/1' } })).code, 400);
+  assert.equal((await call(tmdbHandler, { cookie: ownerCookie(), query: { path: '/movie/603/similar' } })).code, 200);
   const r = await call(tmdbHandler, { cookie: ownerCookie(), query: { path: '/search/movie', query: 'heat' } });
   assert.equal(r.code, 200);
   assert.ok(seen.includes('api_key=serverkey') && seen.includes('query=heat'));

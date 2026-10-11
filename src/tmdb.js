@@ -83,6 +83,7 @@ export function createClient({ key, proxy = false, fetchImpl = globalThis.fetch 
     },
     details: id => get(`/movie/${id}`, { append_to_response: 'credits,watch/providers,external_ids' }).then(normalize),
     recommendations: id => get(`/movie/${id}/recommendations`).then(r => r.results.map(normalize)),
+    similar: id => get(`/movie/${id}/similar`).then(r => r.results.map(normalize)),
     // genreMode 'or' = any of the genres, 'and' = all of them.
     discover: ({ genreIds = [], genreMode = 'or', minVotes = 500, page = 1, sortBy = 'vote_average.desc', dateGte, dateLte } = {}) =>
       get('/discover/movie', {

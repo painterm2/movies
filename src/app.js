@@ -1,7 +1,7 @@
 import { load, save, migrate, emptyState } from './store.js';
 import { parseExport, mergeIntoLibrary, movieKey, norm, isListExport, parseList } from './importers.js';
 import * as R from './ranking.js';
-import { buildProfile, rank as rankCandidates } from './recommend.js';
+import { buildProfile, rank as rankCandidates, rankSimilar, localSimilar } from './recommend.js';
 import { MOODS, GENRE_NAME_TO_ID, GENRE_IDS, moodScore } from './moods.js';
 import { BRAND } from './brand.js';
 import { createClient, imageUrl, streamingOn, streamingInfo } from './tmdb.js';
@@ -415,12 +415,14 @@ function srcMeta(src, i) {
 const $modal = document.getElementById('modal');
 function renderModal() {
   const d = ui.detail;
+  const wasOpen = !$modal.hidden, scroll = $modal.querySelector('.sheet')?.scrollTop || 0;
   $modal.hidden = !d;
   document.body.classList.toggle('noscroll', Boolean(d));
   if (!d) { $modal.innerHTML = ''; return; }
   const m = view(d.meta), k = findKey(m);
-  $modal.innerHTML = `<div class="backdrop" data-act="close-detail"><div class="sheet" role="dialog" aria-label="${esc(m.title)}">
-    <button class="close" data-act="close-detail" aria-label="Close">✕</button>
+  $modal.innerHTML = `<div class="backdrop" data-act="close-detail"><div class="sheet${wasOpen ? '' : ' enter'}" role="dialog" aria-label="${esc(m.title)}">
+    <div class="sheet-bar">${d.stack.length ? '<button class="back" data-act="detail-back">← Back</button>' : '<span></span>'}
+      <button class="close" data-act="close-detail" aria-label="Close">✕</button></div>
     <div class="sheet-grid"><div class="sheet-poster">${poster(m, m.title, '(max-width:720px) 40vw, 240px')}</div>
     <div><h2>${esc(m.title)}</h2>
       <div class="meta">${esc(m.year ?? '')}${m.runtime ? ` · ${m.runtime} min` : ''}${(m.genres || []).length ? ` · ${esc(m.genres.join(', '))}` : ''}</div>
@@ -433,16 +435,51 @@ function renderModal() {
         ${k ? '' : '<button class="primary" data-act="detail-watched">I\'ve watched this</button>'}
         <button class="secondary" data-act="detail-list">${onWatchlist(m) ? '✓ On watchlist (remove)' : '+ Add to watchlist'}</button>
         ${k ? '<button class="ghost danger" data-act="detail-remove">Remove from my list</button>' : ''}
-      </div></div></div></div></div>`;
+      </div></div></div>
+      ${likeHtml(d)}</div></div>`;
+  if (scroll) { const sh = $modal.querySelector('.sheet'); if (sh) sh.scrollTop = scroll; }
 }
+function likeHtml(d) {
+  const L = d.like;
+  if (L.state === 'idle') return `<div class="like"><button class="secondary" data-act="like-load">🎬 Movies like this</button></div>`;
+  if (L.state === 'loading') return `<div class="like"><h3 class="sub">Movies like ${esc(d.meta.title)}</h3><p class="muted">Finding similar films…</p></div>`;
+  if (L.error) return `<div class="like"><h3 class="sub">Movies like ${esc(d.meta.title)}</h3><p class="muted">${esc(L.error)}</p></div>`;
+  return `<div class="like"><h3 class="sub">Movies like ${esc(d.meta.title)}</h3><div class="like-grid">${L.items.map(({ meta }, i) => `
+    <div class="like-tile"><div data-act="like-open" data-i="${i}" class="like-hit">${poster(meta, meta.title, '(max-width:720px) 28vw, 120px')}
+      <div class="t">${esc(meta.title)}</div><div class="muted">${esc(meta.year ?? '')}</div></div>
+      <button class="chip-btn" data-act="like-list" data-i="${i}">${onWatchlist(meta) ? '✓ List' : '+ List'}</button></div>`).join('')}</div></div>`;
+}
+
 document.addEventListener('keydown', e => { if (e.key === 'Escape' && ui.detail) { ui.detail = null; renderModal(); } });
 
-async function openDetail(meta) {
-  ui.detail = { meta, loading: true }; renderModal();
+async function openDetail(meta, push = false) {
+  const stack = push && ui.detail ? [...ui.detail.stack, ui.detail.meta] : [];
+  ui.detail = { meta, loading: true, stack, like: { state: 'idle', items: [], error: '' } }; renderModal();
+  $modal.querySelector('.sheet')?.scrollTo?.(0, 0);
   const full = await fullMeta(meta);
-  if (ui.detail?.meta === meta || ui.detail?.meta.tmdbId === meta.tmdbId) { ui.detail = { meta: full, loading: false }; renderModal(); }
+  if (ui.detail?.meta === meta) { Object.assign(ui.detail, { meta: full, loading: false }); renderModal(); }
   // Keep scores on films I own so lists can show them without refetching.
   const w = state.watchlist.findIndex(x => x.key === meta.key); if (w >= 0 && full.rt != null) { state.watchlist[w] = { ...state.watchlist[w], rt: full.rt, imdb: full.imdb, metacritic: full.metacritic }; persist(false); }
+}
+
+// "Movies like this": similar films to the one open in the sheet.
+async function loadLike() {
+  const d = ui.detail; if (!d) return;
+  const meta = d.meta, api = tmdb();
+  d.like = { state: 'loading', items: [], error: '' }; renderModal();
+  try {
+    const exclude = new Set(Object.keys(state.movies));
+    let items;
+    if (api && meta.tmdbId) {
+      const [recommended, similar] = await Promise.all([api.recommendations(meta.tmdbId).catch(() => []), api.similar(meta.tmdbId).catch(() => [])]);
+      items = rankSimilar({ recommended, similar }, profile(), { exclude, selfKey: meta.key });
+    } else if (isDemo()) {
+      items = localSimilar(meta, DEMO_CATALOG).filter(c => !exclude.has(c.key)).slice(0, 12).map(m => ({ meta: m }));
+    } else throw new Error(tmdbIssue() || 'Sign in to find similar films.');
+    if (ui.detail !== d) return; // closed or navigated away meanwhile
+    d.like = { state: 'done', items, error: items.length ? '' : 'Nothing similar that you haven\'t already watched.' };
+  } catch (e) { if (ui.detail === d) d.like = { state: 'error', items: [], error: e.message }; }
+  renderModal();
 }
 
 // ---- Find: search and browse all films ----------------------------------------------
@@ -824,7 +861,7 @@ async function onClick(e) {
   const btn = e.target.closest('[data-act]'); if (!btn) return;
   const { act } = btn.dataset, s = ui.session;
   if (act === 'close-detail' && e.target !== btn && !e.target.closest('.close')) return; // clicks inside the sheet stay open
-  if (viewOnly() && !['shuffle', 'theme', 'export', 'login', 'logout', 'goto-signin', 'stream-only', 'detail', 'close-detail', 'spot-pick', 'spot-again', 'spot-close', 'spot-stream'].includes(act)) { ui.detail = null; renderModal(); ui.tab = 'settings'; return render(); }
+  if (viewOnly() && !['shuffle', 'theme', 'export', 'login', 'logout', 'goto-signin', 'stream-only', 'detail', 'close-detail', 'like-load', 'like-open', 'detail-back', 'spot-pick', 'spot-again', 'spot-close', 'spot-stream'].includes(act)) { ui.detail = null; renderModal(); ui.tab = 'settings'; return render(); }
   const i = +btn.dataset.i;
   switch (act) {
     case 'shuffle': return shuffle();
@@ -901,6 +938,10 @@ async function onClick(e) {
     }
     case 'detail': return openDetail(srcMeta(btn.dataset.src, +btn.dataset.i));
     case 'close-detail': ui.detail = null; return renderModal();
+    case 'like-load': return loadLike();
+    case 'like-open': return openDetail(ui.detail.like.items[i].meta, true);
+    case 'like-list': toggleWatchlist(ui.detail.like.items[i].meta); renderModal(); return safeRender();
+    case 'detail-back': { const prev = ui.detail.stack[ui.detail.stack.length - 1]; const rest = ui.detail.stack.slice(0, -1); await openDetail(prev); ui.detail.stack = rest; return renderModal(); }
     case 'detail-watched': return logFilm(view(ui.detail.meta));
     case 'detail-list': toggleWatchlist(view(ui.detail.meta)); renderModal(); return safeRender();
     case 'row-watched': return logFilm(view(srcMeta(btn.dataset.src, i)));

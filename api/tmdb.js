@@ -1,7 +1,7 @@
 import { isOwner } from './_auth.js';
 
 // Server-side TMDB proxy so the TMDB key lives in a Vercel env var, not in any browser.
-const ALLOWED = /^\/(search\/movie|discover\/movie|movie\/\d+(\/recommendations)?)$/;
+const ALLOWED = /^\/(search\/movie|discover\/movie|movie\/\d+(\/recommendations|\/similar)?)$/;
 
 export default async function handler(req, res) {
   if (!isOwner(req)) return res.status(401).json({ error: 'Sign in to use recommendations.' });

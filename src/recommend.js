@@ -60,3 +60,24 @@ export function rank(candidates, profile, { mood = null, exclude = new Set(), li
     .sort((a, b) => b.score - a.score)
     .slice(0, limit);
 }
+
+// "Movies like X": TMDB's recommendations (people who liked X also liked...) rank above its
+// "similar" list; within that, films matching my taste float up. Watched films are dropped.
+export function rankSimilar({ recommended = [], similar = [] }, profile, { exclude = new Set(), selfKey = null, limit = 12 } = {}) {
+  const seen = new Set(selfKey ? [selfKey] : []);
+  const out = [];
+  const add = (list, bonus, step) => list.forEach((meta, i) => {
+    if (seen.has(meta.key) || exclude.has(meta.key)) return;
+    seen.add(meta.key);
+    out.push({ meta, score: scoreCandidate(meta, profile).score + bonus - i * step });
+  });
+  add(recommended, 1.5, 0.06);
+  add(similar, 0.5, 0.03);
+  return out.sort((a, b) => b.score - a.score).slice(0, limit);
+}
+
+// Offline fallback (demo catalog): overlap of genres + director.
+export function localSimilar(meta, catalog) {
+  const overlap = c => (c.genres || []).filter(g => (meta.genres || []).includes(g)).length + ((c.directors || []).some(d => (meta.directors || []).includes(d)) ? 2 : 0);
+  return catalog.filter(c => c.key !== meta.key && overlap(c) > 0).sort((a, b) => overlap(b) - overlap(a));
+}
